@@ -84,13 +84,11 @@
     <string name="font_system_hant">系统黑体 · 繁体中文</string>
     <string name="app_icon_description">格窗 图标</string>
     <string name="about_tagline">一步，再进一步。</string>
-    <string name="about_tribute">向 OneStep 致敬，带来侧边多任务的体验。</string>
+    <string name="about_tribute">大窗配小窗，边用边切。</string>
     <string name="about_windows_title">一个主窗口，三个小窗</string>
     <string name="about_features">并排处理不同应用，拖动交换窗口，从后台卡片连续添加应用。把小窗拖到顶部控制区，即可移回后台。顶部还提供工作区监测、常用应用和自定义文字等功能。</string>
     <string name="about_compatibility">本项目通过 LSPosed 接入系统界面，保留手机原有桌面。系统升级后，部分功能可能需要适配。</string>
     <string name="about_credits">开源协议 · Apache License 2.0\n格窗 · 基于开源项目二次开发</string>
-    <string name="acknowledgements_title">致谢</string>
-    <string name="acknowledgements_summary">感谢参与测试与反馈的朋友。</string>
     <string name="update_current_version">当前版本 %1$s（%2$d）\n点击检查更新以获取最新版本。</string>
     <string name="update_title">应用更新</string>
     <string name="update_releases">查看发布版本</string>

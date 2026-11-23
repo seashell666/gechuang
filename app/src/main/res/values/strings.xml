@@ -92,13 +92,11 @@
     <string name="font_system_hant">System sans · Traditional Chinese</string>
     <string name="app_icon_description">Gechuang icon</string>
     <string name="about_tagline">One step, then another.</string>
-    <string name="about_tribute">A tribute to OneStep: side-by-side multitasking for your phone.</string>
+    <string name="about_tribute">One big window and three live panes, side by side.</string>
     <string name="about_windows_title">One main window, three small windows</string>
     <string name="about_features">Use apps side by side, drag to swap windows, and add apps from recent-task cards. Drag a small window to the top controls to send it to the background. The top area also offers workspace monitoring, frequently used apps, and custom text.</string>
     <string name="about_compatibility">This project integrates with the system UI through LSPosed and keeps your phone’s original launcher. Some features may need adjustments after system updates.</string>
     <string name="about_credits">License · Apache License 2.0\nGechuang · built on an open-source project</string>
-    <string name="acknowledgements_title">Acknowledgements</string>
-    <string name="acknowledgements_summary">Thanks to everyone who tested and shared feedback.</string>
     <string name="update_current_version">Current version %1$s (%2$d)\nTap Check for updates to find the latest version.</string>
     <string name="update_title">App updates</string>
     <string name="update_releases">View releases</string>

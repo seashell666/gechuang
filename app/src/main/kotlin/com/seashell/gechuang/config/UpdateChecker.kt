@@ -50,14 +50,15 @@ internal object UpdateChecker {
     }
 
     private fun versionParts(value: String): List<Long>? {
-        // Repository tags use vX.Y.Z; reject unknown schemes rather than guess ordering.
-        val match = Regex("^[vV]?(\\d+)\\.(\\d+)\\.(\\d+)$").matchEntire(value) ?: return null
-        return match.groupValues.drop(1).map { it.toLongOrNull() ?: return null }
+        // Repository tags use vX.Y.Z or vX.Y.Z-miui.N; keep numeric suffixes comparable.
+        val match = Regex("^[vV]?(\\d+(?:\\.\\d+){2,})(?:[-+].*)?$").matchEntire(value) ?: return null
+        return Regex("\\d+").findAll(match.groupValues[1]).map { it.value.toLong() }.toList()
     }
 
     private fun compareVersions(left: List<Long>, right: List<Long>): Int {
-        for (index in left.indices) {
-            val comparison = left[index].compareTo(right[index])
+        val length = maxOf(left.size, right.size)
+        for (index in 0 until length) {
+            val comparison = left.getOrElse(index) { 0L }.compareTo(right.getOrElse(index) { 0L })
             if (comparison != 0) return comparison
         }
         return 0

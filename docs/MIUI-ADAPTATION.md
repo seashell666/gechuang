@@ -28,6 +28,7 @@
 | Android 13 拦截 `SurfaceControl.Transaction#apply` 导致 `BLASTBufferQueue::mergeWithNextTransaction` SIGSEGV（fault 0x80） | SDK < 34 不装 task_surface_transaction_guard |
 | SystemUI 内嵌 SurfaceView 在 A13 首次绘制触发同一类 BLAST 崩溃 | SDK < 34 将视频预览 SurfaceView 设为 GONE；普通小窗/主窗不受影响 |
 | 界面与图标 | 恢复原版资源、布局、按钮和关于页，不再品牌化重做 |
+| 更新检查只认 `vX.Y.Z`，遇到 `4.0.5-miui.1` 解析失败 | `UpdateChecker.versionParts` 支持 `-miui.N` 后缀；版本比较按较短一方补 0，避免数组越界 |
 
 ## 签名与发布
 
@@ -38,14 +39,18 @@
 
 设备：小米 11 / MIUI 14 `V14.0.10.0.TKBCNXM` / Android 13 / Magisk 28.1 / Vector 2.2。
 
+当前构建（原版界面恢复版）已安装并在真机回归，安装包 SHA-256 `02cf155b0fd0ecd7fdcd5bf01059a45075c16e0792d2557f0091d7592f09979b`。
+
 通过：
 
-- 右上角状态栏左滑手势打开与关闭工作台（约 1–2 秒）
-- 顶栏应用图标启动 Chrome / 系统设置到大窗，真实渲染且可点击（设置内点 WLAN 生效）
+- 右上角状态栏左滑手势打开与关闭工作台（约 1–2 秒），重启 SystemUI 后再次打开正常
+- 顶栏应用图标启动系统设置到大窗，真实渲染且可点击
 - 侧栏 `+` 生成小窗，小窗内真实应用渲染；点小窗可把它提到主位
 - 侧栏左/右切换，主窗与小窗布局随之重排
-- 顶栏右上角退出图标关闭工作台
-- 反复开关、安装 Release、重启 SystemUI 后不崩溃
+- 顶栏右上角退出图标关闭工作台；反复开关不崩溃
+- 关于页保留原版结构、原版致谢和更新入口；仅署名行为“维护 · seashell666 / 原作者 · lujinxin”
+- 手动点“检查更新”能访问自有仓库 Release 并返回“暂无更新”；App 启动不自动联网、不弹授权/收费/原版校验窗
+- Vector 模块启用，作用域保持 `android`、`com.android.systemui`、`com.miui.home`、`com.miui.personalassistant`；旧 `io.github.yishisanren.panes` 已停用
 
 限制：
 

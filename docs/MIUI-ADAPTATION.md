@@ -27,7 +27,7 @@
 | MIUI 桌面 `com.miui.home` 没有工作区运行时 | 触发协调器识别到 MIUI 桌面时跳过 launcher，只切换 SystemUI；避免等 launcher 60 秒超时并回滚 |
 | Android 13 拦截 `SurfaceControl.Transaction#apply` 导致 `BLASTBufferQueue::mergeWithNextTransaction` SIGSEGV（fault 0x80） | SDK < 34 不装 task_surface_transaction_guard |
 | SystemUI 内嵌 SurfaceView 在 A13 首次绘制触发同一类 BLAST 崩溃 | SDK < 34 将视频预览 SurfaceView 设为 GONE；普通小窗/主窗不受影响 |
-| 上游品牌残留 | 包名 `com.seashell.gechuang`、模块 ID `gechuang`、应用名「格窗」、内部类/日志/窗口名统一 `Gechuang`、新图标；APK 内 `NeXtep` 字符串清零 |
+| 旧品牌残留 | 包名 `com.seashell.gechuang`、模块 ID `gechuang`、应用名「格窗」、内部类/日志/窗口名统一 `Gechuang`、新图标；APK 内旧名称字符串清零 |
 
 ## 签名与发布
 
@@ -53,7 +53,6 @@
 - 视频预览层在 A13 隐藏（见上表）
 - 四指手势未完整验证
 
-## 参考资料
+## 许可
 
-- 上游开源工程 NeXtep：<https://github.com/lujinxin/NeXtep>（Apache-2.0）
-- 第一阶段成品包（格窗(MIUI适配版）4.0.5-miui.1）的 smali 适配记录见旧仓库 `docs/MIUI-ADAPTATION.md`
+见仓库根目录的 LICENSE 与 THIRD_PARTY_NOTICES.md。

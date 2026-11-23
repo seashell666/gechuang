@@ -59,6 +59,10 @@ internal object AboutScreen {
             addView(paragraph(activity.getString(R.string.about_compatibility), 13f))
             addView(View(activity).apply { setBackgroundColor(SettingsPalette.outline(activity)) },
                 LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
+            addView(UpdateSection.create(activity))
+            addView(View(activity).apply { setBackgroundColor(SettingsPalette.outline(activity)) },
+                LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
+            addView(AcknowledgementsSection.create(activity))
             addView(paragraph(activity.getString(R.string.about_credits), 12f))
         }
     }

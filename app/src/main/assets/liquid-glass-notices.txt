@@ -1,4 +1,4 @@
-Gechuang liquid glass navigation
+NeXtep liquid glass navigation
 
 Lens shader portions:
 Copyright 2026, compose-miuix-ui contributors

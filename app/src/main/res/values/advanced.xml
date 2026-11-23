@@ -4,7 +4,7 @@
     <string name="advanced_diagnostics_title">Runtime and diagnostics</string>
     <string name="advanced_intro">Control small-window mode with Shell commands. Copy a command to use it in a gesture, shortcut, automation or terminal.</string>
     <string name="advanced_requirements_title">Before you start</string>
-    <string name="advanced_requirements">Enable Gechuang in LSPosed and restart the device for it to take effect. Run the commands with Root permission while the phone is unlocked.</string>
+    <string name="advanced_requirements">Enable NeXtep in LSPosed and restart the device for it to take effect. Run the commands with Root permission while the phone is unlocked.</string>
     <string name="advanced_commands_title">Shell commands</string>
     <string name="advanced_toggle_title">Toggle small-window mode</string>
     <string name="advanced_toggle_summary">Exit when active; enter otherwise. Copy the complete script.</string>

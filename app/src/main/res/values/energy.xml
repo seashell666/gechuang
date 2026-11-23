@@ -3,7 +3,7 @@
     <string name="energy_monitor_title">Energy monitor</string>
     <string name="energy_monitor_summary">View battery temperature, battery-side power and workspace activity.</string>
     <string name="energy_monitor_notice">Samples every 5 seconds while this page is visible. Sampling stops when you leave or lock the screen. Battery readings describe the whole device. Positive current/power means charging; negative means discharging. Charging power is not total device power. Unsupported readings are shown as —.</string>
-    <string name="energy_runtime_notice">SystemUI CPU includes all work in the shared host, not just Gechuang; 100% is one CPU core. Task queries and preview captures count module operations, and window frames are combined across slots. Average discharge power uses unplugged discharge samples only. These readings cannot isolate Gechuang’s energy use.</string>
+    <string name="energy_runtime_notice">SystemUI CPU includes all work in the shared host, not just NeXtep; 100% is one CPU core. Task queries and preview captures count module operations, and window frames are combined across slots. Average discharge power uses unplugged discharge samples only. These readings cannot isolate NeXtep’s energy use.</string>
     <string name="energy_open">View</string>
     <string name="energy_back">Back</string>
     <string name="energy_waiting">Waiting for samples…</string>

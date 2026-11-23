@@ -4,7 +4,7 @@
     <string name="advanced_diagnostics_title">動作状況と診断</string>
     <string name="advanced_intro">Shell コマンドで小窓モードを操作できます。コマンドをコピーして、ジェスチャー、ショートカット、自動化や端末で使用してください。</string>
     <string name="advanced_requirements_title">使用する前に</string>
-    <string name="advanced_requirements">LSPosed で Gechuang を有効にし、端末を再起動してモジュールを適用してください。画面のロックを解除し、Root 権限でコマンドを実行してください。</string>
+    <string name="advanced_requirements">LSPosed で NeXtep を有効にし、端末を再起動してモジュールを適用してください。画面のロックを解除し、Root 権限でコマンドを実行してください。</string>
     <string name="advanced_commands_title">Shell コマンド</string>
     <string name="advanced_toggle_title">小窓モードを切り替える</string>
     <string name="advanced_toggle_summary">小窓モードなら終了し、それ以外なら開始します。スクリプト全体をコピーしてください。</string>

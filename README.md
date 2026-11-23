@@ -1,6 +1,8 @@
-# 格窗（MIUI 适配版）
+# NeXtep（MIUI 适配版）
 
-侧边多任务工作台：一个**大窗**放当前主应用，侧边可停靠多个**实时小窗**，点哪个小窗就把它提到大窗。为 **Android 13 / MIUI 14** 做了适配。
+侧边多任务工作台：一个**大窗**放当前主应用，侧边可停靠多个**实时小窗**，点哪个小窗就把它提到大窗。为 **Android 13 / MIUI 14** 做了适配；界面、图标、排版和关于页沿用原版。
+
+> 仓库/模块 ID 为 `gechuang`，应用内名称沿用原版 `NeXtep`。
 
 ## 能做什么
 
@@ -10,7 +12,7 @@
 - 手势：从屏幕右上角向左下滑动，打开/关闭工作台。
 - 侧栏：可切到左边或右边，布局跟着变。
 - 工具入口：系统设置、语言、图标、手势开关等。
-- 完全离线：APK 不申请网络权限，没有授权校验、远程开关、诊断上传或更新检查。
+- 更新：只有手动点“检查更新”才访问本仓库的 Release；没有授权校验、诊断上传或后台通信。
 
 ## 已实测的设备
 
@@ -25,16 +27,16 @@
 
 ## 安装
 
-直接下载：[格窗 4.0.5-miui.1](https://github.com/seashell666/gechuang/releases/tag/4.0.5-miui.1)
+直接下载：[NeXtep 4.0.5-miui.1](https://github.com/seashell666/gechuang/releases/tag/4.0.5-miui.1)
 
-1. 在 Vector / LSPosed 里启用 **格窗**。
+1. 在 Vector / LSPosed 里启用 **NeXtep**（模块 ID `gechuang`）。
 2. 作用域勾选：
    - `android`
    - `com.android.systemui`
    - `com.miui.home`
    - `com.miui.personalassistant`
 3. 重启 SystemUI 或重启手机。
-4. 打开格窗 App，按需开关“状态栏触发手势”、语言、桌面图标。
+4. 打开 NeXtep App，按需开关“状态栏触发手势”、语言、桌面图标。
 
 > 包名 `com.seashell.gechuang`，模块 ID `gechuang`。需要 Android 13 及以上；当前主要在 MIUI 14 验证。
 

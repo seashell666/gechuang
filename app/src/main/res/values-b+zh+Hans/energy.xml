@@ -3,7 +3,7 @@
     <string name="energy_monitor_title">能耗监测</string>
     <string name="energy_monitor_summary">查看电池温度、电池侧功率和小窗运行负载。</string>
     <string name="energy_monitor_notice">页面可见时每 5 秒采样，离开页面或锁屏后停止。电池读数反映整机情况；电流、功率正值为充入，负值为放出。充电功率不等于整机功耗。不支持的读数显示为 —。</string>
-    <string name="energy_runtime_notice">SystemUI 宿主 CPU 包含该进程的全部工作，100% 表示占用一个 CPU 核心。任务查询和预览截图为模块操作次数，小窗帧更新为所有小窗的合计。平均放电功率仅统计未插电时的放电采样。这些读数无法单独计算 格窗 的耗电量。</string>
+    <string name="energy_runtime_notice">SystemUI 宿主 CPU 包含该进程的全部工作，100% 表示占用一个 CPU 核心。任务查询和预览截图为模块操作次数，小窗帧更新为所有小窗的合计。平均放电功率仅统计未插电时的放电采样。这些读数无法单独计算 NeXtep 的耗电量。</string>
     <string name="energy_open">查看</string>
     <string name="energy_back">返回</string>
     <string name="energy_waiting">等待采样…</string>

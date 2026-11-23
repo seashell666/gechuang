@@ -1,8 +1,8 @@
-# 格窗 MIUI 14 / Android 13 适配记录
+# NeXtep MIUI 14 / Android 13 适配记录
 
 ## 目标
 
-把上游开源侧边工作台工程跑在小米 11（MIUI 14 / Android 13 / SDK 33）上，并把它变成可独立维护的「格窗」项目：新包名、新签名、新品牌、无上游服务器依赖。
+把开源侧边工作台跑在小米 11（MIUI 14 / Android 13 / SDK 33）上，并放到可独立维护的自有仓库：保留原版界面、排版、图标、关于页和更新入口，只做系统兼容与项目身份的最小改动。
 
 ## 编译环境
 
@@ -27,7 +27,7 @@
 | MIUI 桌面 `com.miui.home` 没有工作区运行时 | 触发协调器识别到 MIUI 桌面时跳过 launcher，只切换 SystemUI；避免等 launcher 60 秒超时并回滚 |
 | Android 13 拦截 `SurfaceControl.Transaction#apply` 导致 `BLASTBufferQueue::mergeWithNextTransaction` SIGSEGV（fault 0x80） | SDK < 34 不装 task_surface_transaction_guard |
 | SystemUI 内嵌 SurfaceView 在 A13 首次绘制触发同一类 BLAST 崩溃 | SDK < 34 将视频预览 SurfaceView 设为 GONE；普通小窗/主窗不受影响 |
-| 旧品牌残留 | 包名 `com.seashell.gechuang`、模块 ID `gechuang`、应用名「格窗」、内部类/日志/窗口名统一 `Gechuang`、新图标；APK 内旧名称字符串清零 |
+| 界面与图标 | 恢复原版资源、布局、按钮和关于页，不再品牌化重做 |
 
 ## 签名与发布
 

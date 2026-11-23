@@ -3,7 +3,7 @@
     <string name="energy_monitor_title">電力モニター</string>
     <string name="energy_monitor_summary">バッテリー温度、電池側の電力、小ウィンドウの負荷を確認します。</string>
     <string name="energy_monitor_notice">表示中は 5 秒ごとに測定し、画面を離れるかロックすると停止します。電池の値は端末全体のものです。電流と電力の正値は充電、負値は放電を表します。充電電力は端末の総消費電力ではありません。非対応の値は — と表示します。</string>
-    <string name="energy_runtime_notice">SystemUI の CPU 使用率は Gechuang 以外も含むプロセス全体の値で、100% は CPU 1 コア相当です。タスク照会とプレビュー撮影はモジュールの操作回数、フレーム更新は全小ウィンドウの合計です。平均放電電力は電源未接続時の放電サンプルのみを使用します。Gechuang 単独の消費電力は算出できません。</string>
+    <string name="energy_runtime_notice">SystemUI の CPU 使用率は NeXtep 以外も含むプロセス全体の値で、100% は CPU 1 コア相当です。タスク照会とプレビュー撮影はモジュールの操作回数、フレーム更新は全小ウィンドウの合計です。平均放電電力は電源未接続時の放電サンプルのみを使用します。NeXtep 単独の消費電力は算出できません。</string>
     <string name="energy_open">表示</string>
     <string name="energy_back">戻る</string>
     <string name="energy_waiting">測定待ち…</string>

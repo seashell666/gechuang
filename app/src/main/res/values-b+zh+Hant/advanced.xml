@@ -4,7 +4,7 @@
     <string name="advanced_diagnostics_title">執行狀態與診斷</string>
     <string name="advanced_intro">透過 Shell 命令控制小窗模式。複製命令後，可用於手勢、快捷操作、自動化或終端機。</string>
     <string name="advanced_requirements_title">使用前</string>
-    <string name="advanced_requirements">在 LSPosed 中啟用 格窗，並重新啟動裝置使模組生效。請在手機解鎖後，以 Root 權限執行命令。</string>
+    <string name="advanced_requirements">在 LSPosed 中啟用 NeXtep，並重新啟動裝置使模組生效。請在手機解鎖後，以 Root 權限執行命令。</string>
     <string name="advanced_commands_title">Shell 命令</string>
     <string name="advanced_toggle_title">切換小窗模式</string>
     <string name="advanced_toggle_summary">已進入則退出，否則進入。請複製完整指令碼。</string>

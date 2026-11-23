@@ -24,6 +24,8 @@
 
 ## 安装
 
+直接下载：[格窗 4.0.5-miui.1](https://github.com/seashell666/gechuang/releases/tag/4.0.5-miui.1)
+
 1. 在 Vector / LSPosed 里启用 **格窗**。
 2. 作用域勾选：
    - `android`

@@ -1,0 +1,10 @@
+id=gechuang
+name=格窗
+version=4.0.5-miui.1
+versionCode=304
+author=seashell666
+description=大窗 + 实时小窗的多任务工作台（Android 13 / MIUI 14 适配）
+minApiVersion=101
+targetApiVersion=102
+staticScope=false
+exceptionMode=protective

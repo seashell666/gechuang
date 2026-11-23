@@ -1,0 +1,39 @@
+# IDE and machine-local settings
+.idea/
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+/app/release/
+captures/
+diagnostics/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.apks
+*.hprof
+*.log
+
+# Signing material
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*.pem
+keystore.properties
+
+# Temporary analysis
+artifacts/
+IconDesign/
+graphify-out/
+.codegraph/
+.memorax-code/

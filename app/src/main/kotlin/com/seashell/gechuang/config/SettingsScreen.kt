@@ -469,7 +469,9 @@ object SettingsScreen {
 
             addView(sectionCard(activity).apply {
                 addView(sectionContent(activity).apply {
-                    addView(sectionTitle(activity, activity.getString(R.string.app_strip_title)), matchWidth())
+                    addView(sectionTitle(activity, activity.getString(R.string.app_strip_title)).apply {
+                        id = R.id.app_strip_section
+                    }, matchWidth())
                     addView(sectionDescription(activity, activity.getString(R.string.app_strip_summary)), matchWidth())
                     addView(modeSelector, matchWidth().apply { topMargin = dp(activity, 14) })
                     addView(modeDescription, matchWidth().apply { topMargin = dp(activity, 8) })

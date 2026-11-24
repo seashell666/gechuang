@@ -3,6 +3,7 @@ package com.seashell.gechuang.xposed
 import android.util.Log
 import com.seashell.gechuang.logging.GechuangLog
 import com.seashell.gechuang.launcher.ColorOsLauncherHook
+import com.seashell.gechuang.launcher.MiuiHomeRecentsHook
 import com.seashell.gechuang.multiapp.OplusMultiAppHook
 import com.seashell.gechuang.framework.TaskSurfaceCompat
 import com.seashell.gechuang.safety.EmergencyDisable
@@ -59,6 +60,13 @@ class GechuangHookEntry : XposedModule() {
                 FeatureGate.LAUNCHER_TRANSFORM.defaultEnabled
             ) {
                 OplusMultiAppHook.install(this, param.defaultClassLoader)
+            }
+            return
+        }
+
+        if (packageName == "com.miui.home") {
+            if (!EmergencyDisable.isRequested() && FeatureGate.LAUNCHER_TRANSFORM.defaultEnabled) {
+                MiuiHomeRecentsHook.install(this, param.defaultClassLoader)
             }
             return
         }

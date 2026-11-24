@@ -36,6 +36,14 @@ class TaskSwitcherView(
     var textureView: TextureView = createTextureView()
         private set
 
+    private val mirrorView = TaskMirrorView(context)
+    private val mirrorShield = View(context).apply {
+        setBackgroundColor(Color.TRANSPARENT)
+        isClickable = true
+        setOnClickListener { listener?.onSlotClicked(slotIndex) }
+        visibility = GONE
+    }
+
     private val statusView = TextView(context).apply {
         setTextColor(Color.WHITE)
         textSize = 20f
@@ -50,6 +58,7 @@ class TaskSwitcherView(
     private var ownsDrag = false
     private var acceptsContentDrag = false
     private var exchangePreviewActive = false
+    private var mainMirrorVisible = false
     private val backgroundSwipe = SlotBackgroundSwipeGesture(
         view = this,
         currentTask = {
@@ -66,6 +75,9 @@ class TaskSwitcherView(
         isClickable = true
         setBackgroundColor(Color.TRANSPARENT)
         addView(textureView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addView(mirrorView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        mirrorView.onTap = { listener?.onSlotClicked(slotIndex) }
+        addView(mirrorShield, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(
             statusView,
             LayoutParams(dp(30), dp(30), Gravity.CENTER),
@@ -176,6 +188,38 @@ class TaskSwitcherView(
         }
     }
 
+    /** Show the live main-task mirror while this slot is promoted. The slot's
+     * own TextureView is hidden so the user sees the swapped app, not the stale
+     * side app. */
+    fun showMainMirror(
+        taskId: Int,
+        sourceBounds: Rect,
+        width: Int,
+        height: Int,
+        sourceScale: Float = 1f,
+        sourceTranslationX: Float = 0f,
+        sourceTranslationY: Float = 0f,
+    ) {
+        textureView.animate().cancel()
+        textureView.alpha = 0f
+        setStatusVisible(false)
+        mainMirrorVisible = true
+        mirrorShield.visibility = VISIBLE
+        mirrorView.show(
+            taskId, sourceBounds, width, height,
+            sourceScale, sourceTranslationX, sourceTranslationY,
+        )
+    }
+
+    fun hideMainMirror() {
+        mainMirrorVisible = false
+        mirrorShield.visibility = GONE
+        mirrorView.hide()
+        textureView.animate().cancel()
+        textureView.alpha = 1f
+        setStatusVisible(currentState !is SlotState.Occupied)
+    }
+
     fun replaceTextureView(listener: TextureView.SurfaceTextureListener): TextureView {
         backgroundSwipe.cancel()
         waiting = true
@@ -227,6 +271,7 @@ class TaskSwitcherView(
         acceptsContentDrag = false
         backgroundSwipe.cancel()
         finishDrag()
+        hideMainMirror()
         super.onDetachedFromWindow()
     }
 
@@ -234,7 +279,7 @@ class TaskSwitcherView(
         if (!ownsDrag) return
         ownsDrag = false
         listener?.onSlotDragEnded()
-        if (!busy && currentState is SlotState.Occupied) textureView.alpha = 1f
+        if (!busy && currentState is SlotState.Occupied && !mainMirrorVisible) textureView.alpha = 1f
     }
 
     private fun handleDrag(event: DragEvent): Boolean {
@@ -319,7 +364,7 @@ class TaskSwitcherView(
                 .setInterpolator(transitionInterpolator)
                 .start()
         } else {
-            textureView.alpha = 0f
+            if (!mainMirrorVisible) textureView.alpha = 0f
             textureView.scaleX = 1f
             textureView.scaleY = 1f
         }
@@ -340,7 +385,7 @@ class TaskSwitcherView(
         setStatusVisible(false)
 
         textureView.animate().cancel()
-        if (animated) {
+        if (animated && !mainMirrorVisible) {
             textureView.alpha = 0f
             textureView.scaleX = CONTENT_ENTER_SCALE
             textureView.scaleY = CONTENT_ENTER_SCALE
@@ -352,7 +397,7 @@ class TaskSwitcherView(
                 .setInterpolator(transitionInterpolator)
                 .start()
         } else {
-            textureView.alpha = 1f
+            if (!mainMirrorVisible) textureView.alpha = 1f
             textureView.scaleX = 1f
             textureView.scaleY = 1f
         }

@@ -38,6 +38,7 @@ class SlotTaskCoordinator(
         { _, move, finished -> try { move() } finally { finished() } },
     private val onInternalSlotDrag: (TaskSwitcherView, SlotTaskDrag) -> Boolean = { _, _ -> false },
     private val onInternalDragTouch: (android.view.View, android.view.MotionEvent) -> Boolean = { _, _ -> false },
+    private val onActiveSlotChanged: (slotIndex: Int?, taskId: Int?) -> Unit = { _, _ -> },
 ) : VirtualDisplaySlot.Listener, TaskSwitcherView.Listener {
     private data class SlotRecord(
         var state: SlotState = SlotState.Empty,
@@ -86,6 +87,8 @@ class SlotTaskCoordinator(
     private var promotedRecoveryTask: TaskRepository.TaskSnapshot? = null
     private var promotedRecoveryDeadline = 0L
     private var promotedRecoveryAttempts = 0
+    private var activeOverlaySlotIndex: Int? = null
+    private var activeOverlayTaskId: Int? = null
     private val contentDrag = SlotContentDragController(
         context = applicationContext,
         returnAfterSharing = returnAfterSharing,
@@ -154,7 +157,10 @@ class SlotTaskCoordinator(
         active = true
         lastFullReconciliationAt = 0L
         refreshPolicy.onTaskChanged(SystemClock.uptimeMillis())
-        slots.forEach(VirtualDisplaySlot::activate)
+        // Only the hot first side slot is materialised when the workspace
+        // opens. Empty cold slots create their VirtualDisplay on first use,
+        // which removes five display/Activity starts from the open path.
+        slots.firstOrNull()?.activate()
         handler.removeCallbacks(reconciliation)
         reconciliationAt = 0L
         scheduleReconciliation(WorkspaceRefreshPolicy.FAST_INTERVAL_MS)
@@ -165,6 +171,11 @@ class SlotTaskCoordinator(
         ensureMainThread()
         if (!active) return
         contentDrag.cancel()
+        if (activeOverlaySlotIndex != null || activeOverlayTaskId != null) {
+            activeOverlaySlotIndex = null
+            activeOverlayTaskId = null
+            onActiveSlotChanged?.invoke(null, null)
+        }
         // Never destroy a display while a task failed to leave it.
         try {
             parkTasksBeforeExit()
@@ -277,6 +288,11 @@ class SlotTaskCoordinator(
         if (value) {
             contentDrag.cancel()
             suspended = true
+            if (activeOverlaySlotIndex != null || activeOverlayTaskId != null) {
+                activeOverlaySlotIndex = null
+                activeOverlayTaskId = null
+                onActiveSlotChanged?.invoke(null, null)
+            }
             cancelPendingExchange()
             onSlotDragEnded()
             recentSelectionGeneration += 1
@@ -292,7 +308,8 @@ class SlotTaskCoordinator(
                 it.setSuspended(true)
             }
         } else {
-            slots.forEach { slot ->
+            slots.forEachIndexed { index, slot ->
+                if (index != 0 && slot.displayId() == null) return@forEachIndexed
                 runCatching { slot.setSuspended(false) }.onFailure {
                     // One delayed/invalid preview Surface must not keep HOME and
                     // all SystemUI panels hidden. Retry that slot in reconciliation.
@@ -318,9 +335,74 @@ class SlotTaskCoordinator(
         }
     }
 
+    /**
+     * Promote a side slot by giving it the one full-size active surface. The
+     * task stays in its VirtualDisplay; nothing is moved to display 0.
+     */
+    fun activateSlotOverlay(slotIndex: Int, occupied: SlotState.Occupied): Boolean {
+        ensureMainThread()
+        if (!active || suspended || slotIndex !in slots.indices) return false
+        val live = taskRepository.findTask(occupied.taskId)
+        if (live == null || live.displayId != occupied.displayId) {
+            GechuangLog.warn(
+                "slot_overlay",
+                "Refusing stale activation slot=$slotIndex task=${occupied.taskId} liveDisplay=${live?.displayId}",
+            )
+            return false
+        }
+        if (activeOverlaySlotIndex == slotIndex && activeOverlayTaskId == occupied.taskId) {
+            return true
+        }
+        activeOverlaySlotIndex = slotIndex
+        activeOverlayTaskId = occupied.taskId
+        // The side display now has IME_POLICY_LOCAL, so focusing its task keeps
+        // both input and the keyboard inside the promoted surface.
+        ActivityTaskManagerCompat.setFocusedTask(occupied.taskId).onFailure { error ->
+            GechuangLog.warn("slot_overlay", "Unable to focus side task=${occupied.taskId}", error)
+        }
+        onActiveSlotChanged?.invoke(slotIndex, occupied.taskId)
+        GechuangLog.info(
+            "slot_overlay",
+            "Activated slot=$slotIndex task=${occupied.taskId} display=${occupied.displayId} (no task move)",
+        )
+        return true
+    }
+
+    /** Leave the side overlay and put input focus back on the real main task. */
+    fun deactivateSlotOverlay() {
+        ensureMainThread()
+        val previous = activeOverlaySlotIndex
+        activeOverlaySlotIndex = null
+        activeOverlayTaskId = null
+        onActiveSlotChanged?.invoke(null, null)
+        if (previous != null) {
+            GechuangLog.info("slot_overlay", "Deactivated slot=$previous")
+        }
+        val mainTaskId = mainTaskPresenter.currentTaskId()
+            ?: taskRepository.runningTasks()
+                .firstOrNull { it.displayId == Display.DEFAULT_DISPLAY }?.taskId
+        if (mainTaskId != null) {
+            ActivityTaskManagerCompat.setFocusedTask(mainTaskId).onFailure { error ->
+                GechuangLog.warn("slot_overlay", "Unable to restore main focus task=$mainTaskId", error)
+            }
+        }
+        GechuangLog.info("slot_overlay", "Deactivated previous=$previous; main focus=$mainTaskId")
+    }
+
+    fun isSlotOverlayActive(slotIndex: Int? = activeOverlaySlotIndex): Boolean =
+        slotIndex != null && activeOverlaySlotIndex == slotIndex
+
     fun launchInSlot(intent: Intent, slotIndex: Int = 0): Result<Unit> {
         ensureMainThread()
+        ensureSlotDisplay(slotIndex)
         return assignIntent(slotIndex, intent)
+    }
+
+    private fun ensureSlotDisplay(slotIndex: Int) {
+        if (slotIndex !in slots.indices) return
+        val slot = slots[slotIndex]
+        if (slot.displayId() != null) return
+        slot.activate()
     }
 
     fun openInMain(sourceIntent: Intent, autoMinimizeCurrent: Boolean = false): Result<Unit> {
@@ -368,6 +450,21 @@ class SlotTaskCoordinator(
                 }
             }
 
+            if (existing != null && existing.displayId != Display.DEFAULT_DISPLAY) {
+                val sourceSlot = slotRecords.indexOfFirst { record ->
+                    (record.state as? SlotState.Occupied)?.taskId == existing.taskId
+                }
+                val sourceState = sourceSlot.takeIf { it >= 0 }
+                    ?.let { slotRecords[it].state as? SlotState.Occupied }
+                if (sourceState != null && activateSlotOverlay(sourceSlot, sourceState)) {
+                    // The app already lives in a side room. Show its existing
+                    // surface full-size instead of moving it to display 0.
+                    return@runTransition
+                }
+            }
+            if (activeOverlaySlotIndex != null) {
+                deactivateSlotOverlay()
+            }
             if (existing != null && existing.windowingMode == WINDOWING_MODE_PINNED && openDockedPip(existing.taskId)) {
                 minimizePreviousMain()
                 onTasksChanged()
@@ -438,8 +535,15 @@ class SlotTaskCoordinator(
             if (sourceSlot >= 0) {
                 val live = checkNotNull(taskRepository.findTask(retained.taskId))
                 check(live.userId == selected.userId && live.component.packageName == selected.component.packageName)
+                val occupied = slotRecords[sourceSlot].state as? SlotState.Occupied
+                if (occupied != null && activateSlotOverlay(sourceSlot, occupied)) {
+                    return@runTransition
+                }
                 swapWithMain(sourceSlot, slotRecords[sourceSlot].state as SlotState.Occupied)
                 return@runTransition
+            }
+            if (activeOverlaySlotIndex != null) {
+                deactivateSlotOverlay()
             }
             val previous = taskRepository.foregroundTask()
             val live = taskRepository.findTask(retained.taskId) ?: run {
@@ -471,12 +575,40 @@ class SlotTaskCoordinator(
         if (!validActiveSlot(slotIndex) || recentSelectionPending || activeDrag != null) return false
         val ready = slotRecords[slotIndex].state as? SlotState.Ready ?: return false
         if (slotRecords[slotIndex].pendingComponent != null || slotRecords[slotIndex].retainedTaskId != null) return false
+        ensureSlotDisplay(slotIndex)
         return runTransition("drop recent task=${selected.taskId} slot=$slotIndex") {
             check(slotRecords[slotIndex].state == ready && slots[slotIndex].displayId() == ready.displayId)
             assignRecentTask(slotIndex, ready, selected)
         }.onFailure {
             showMessage(AppLanguage.string(applicationContext, R.string.recent_add_failed))
         }.isSuccess
+    }
+
+    /** MIUI Home's recents menu entry: move an existing card into the first free
+     * sidebar slot without launching a second copy of the app. */
+    fun openTaskInSlot(taskId: Int, userId: Int, component: ComponentName): Boolean {
+        ensureMainThread()
+        if (!active || suspended || transitionInProgress || recentSelectionPending) return false
+        val existingSlot = slotRecords.indexOfFirst {
+            (it.state as? SlotState.Occupied)?.taskId == taskId
+        }
+        if (existingSlot >= 0) {
+            val occupied = slotRecords[existingSlot].state as SlotState.Occupied
+            return activateSlotOverlay(existingSlot, occupied)
+        }
+        if (slotRecords.any { (it.state as? SlotState.Occupied)?.taskId == taskId }) return true
+        val running = taskRepository.runningTasks()
+        val index = slotRecords.indexOfFirst { record ->
+            val ready = record.state as? SlotState.Ready ?: return@indexOfFirst false
+            record.pendingComponent == null && record.retainedTaskId == null &&
+                !shouldRecoverMigratedTask(record) && running.none { it.displayId == ready.displayId }
+        }
+        if (index < 0) {
+            GechuangLog.warn("slot_coordinator", "No empty slot for recents task=$taskId")
+            return false
+        }
+        ensureSlotDisplay(index)
+        return onRecentTaskDropped(index, SelectedRecentTask(taskId, userId, component))
     }
 
     fun openExternalInMain(sourceIntent: Intent): Result<Unit> {
@@ -644,12 +776,14 @@ class SlotTaskCoordinator(
                 return
             }
         }
+        ensureSlotDisplay(slotIndex)
         when (val state = slotRecords[slotIndex].state) {
-            is SlotState.Occupied -> runTransition(
-                "swap slot=$slotIndex taskId=${state.taskId}",
-                mainSlotIndex = slotIndex,
-            ) {
-                swapWithMain(slotIndex, state)
+            is SlotState.Occupied -> {
+                if (activeOverlaySlotIndex == slotIndex) {
+                    deactivateSlotOverlay()
+                } else {
+                    activateSlotOverlay(slotIndex, state)
+                }
             }
             is SlotState.Ready -> {
                 if (slotRecords[slotIndex].pendingComponent != null) return
@@ -1260,6 +1394,15 @@ class SlotTaskCoordinator(
             if (presentation.isFailure && taskRepository.findTask(slotTask.taskId) != null) {
                 presentation.getOrThrow()
             }
+            // Moving the old main task into the virtual display can hand focus
+            // back to HOME on display 0. Re-assert the promoted task *after* all
+            // display moves; otherwise the main cell shows the launcher even
+            // though the task surface was already fitted.
+            taskRepository.bringTaskToFront(slotTask.taskId).getOrThrow()
+            if (taskRepository.foregroundTask()?.taskId != slotTask.taskId) {
+                SystemClock.sleep(80)
+                taskRepository.bringTaskToFront(slotTask.taskId).getOrThrow()
+            }
             schedulePromotedTaskRecovery()
         } catch (error: Throwable) {
             clearPromotedTaskRecovery()
@@ -1339,6 +1482,7 @@ class SlotTaskCoordinator(
                 return moveResult ?: Result.failure(IllegalStateException("Workspace move is already running"))
             }
             movePerformed = true
+            val moveStartedAt = SystemClock.uptimeMillis()
             val result = runCatching {
                 check(active && !suspended) { "Workspace is no longer interactive" }
                 if (mainSlotIndex != null) {
@@ -1352,7 +1496,11 @@ class SlotTaskCoordinator(
                 if (animated) showMessage(AppLanguage.string(applicationContext, R.string.window_swap_incomplete))
             }
             moveResult = result
-            GechuangLog.info("slot_coordinator", "Transition move completed $label")
+            GechuangLog.info(
+                "slot_coordinator",
+                "Transition move completed $label operationMs=${SystemClock.uptimeMillis() - moveStartedAt} " +
+                    "success=${result.isSuccess}",
+            )
             return result
         }
         fun finishTransition() {
@@ -1934,18 +2082,31 @@ class SlotTaskCoordinator(
         } else {
             TaskSurfaceCompat.cancelPreparedPromotion(taskId)
         }
+        val startedAt = SystemClock.uptimeMillis()
         try {
             ActivityTaskManagerCompat.moveTaskToDisplay(taskId, displayId).getOrThrow()
         } catch (error: Throwable) {
             TaskSurfaceCompat.cancelDisplayExchange(taskId)
             throw error
         }
+        val callDoneAt = SystemClock.uptimeMillis()
+        GechuangLog.info(
+            "slot_move_timing",
+            "move call task=$taskId display=$displayId callMs=${callDoneAt - startedAt}",
+        )
         val deadline = SystemClock.uptimeMillis() + DISPLAY_MOVE_TIMEOUT_MS
         var observedDisplayId = taskRepository.findTask(taskId)?.displayId
+        var polls = 0
         while (observedDisplayId != displayId && SystemClock.uptimeMillis() < deadline) {
             SystemClock.sleep(DISPLAY_MOVE_POLL_MS)
             observedDisplayId = taskRepository.findTask(taskId)?.displayId
+            polls++
         }
+        GechuangLog.info(
+            "slot_move_timing",
+            "move settled task=$taskId display=$displayId polls=$polls " +
+                "blockedMs=${SystemClock.uptimeMillis() - callDoneAt} totalMs=${SystemClock.uptimeMillis() - startedAt}",
+        )
         check(observedDisplayId == displayId) {
             "Task $taskId display move did not settle: expected=$displayId " +
                 "actual=$observedDisplayId"
@@ -1958,8 +2119,10 @@ class SlotTaskCoordinator(
         densityDpi: Int,
         windowingMode: Int,
     ) {
+        val startedAt = SystemClock.uptimeMillis()
         val deadline = SystemClock.uptimeMillis() + TASK_LAYOUT_TIMEOUT_MS
         var snapshot = taskRepository.findTask(taskId)
+        var polls = 0
         while (snapshot != null &&
             (snapshot.bounds != bounds ||
                 snapshot.densityDpi != densityDpi ||
@@ -1968,7 +2131,14 @@ class SlotTaskCoordinator(
         ) {
             SystemClock.sleep(TASK_LAYOUT_POLL_MS)
             snapshot = taskRepository.findTask(taskId)
+            polls++
         }
+        GechuangLog.info(
+            "slot_layout_timing",
+            "layout wait task=$taskId expected=$bounds/$densityDpi/$windowingMode polls=$polls " +
+                "blockedMs=${SystemClock.uptimeMillis() - startedAt} " +
+                "actual=${snapshot?.bounds}/${snapshot?.densityDpi}/${snapshot?.windowingMode}",
+        )
         check(snapshot != null &&
             snapshot.bounds == bounds &&
             snapshot.densityDpi == densityDpi &&
@@ -2018,8 +2188,8 @@ class SlotTaskCoordinator(
 
     private companion object {
         const val SETTLE_DELAY_MS = 700L
-        const val MAIN_LAUNCH_POLL_MS = 200L
-        const val MAX_MAIN_LAUNCH_POLLS = 3
+        const val MAIN_LAUNCH_POLL_MS = 100L
+        const val MAX_MAIN_LAUNCH_POLLS = 4
         const val FULL_RECONCILE_INTERVAL_MS = 1_000L
         const val TASK_CHANGE_COALESCE_MS = 80L
         const val MAX_PENDING_POLLS = 4

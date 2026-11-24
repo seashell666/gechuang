@@ -1,6 +1,7 @@
 package com.seashell.gechuang.config
 
 import android.graphics.Color
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -25,6 +26,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         supportActionBar?.hide()
+        val openAppPicker = intent?.getBooleanExtra(EXTRA_OPEN_APP_PICKER, false) == true
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -134,6 +136,15 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(root)
         ViewCompat.requestApplyInsets(root)
+        if (openAppPicker) {
+            val settingsScroll = pages[0]
+            settingsScroll.post {
+                val target = settingsScroll.findViewById<View>(R.id.app_strip_section) ?: return@post
+                val rect = Rect()
+                settingsScroll.offsetDescendantRectToMyCoords(target, rect)
+                settingsScroll.smoothScrollTo(0, (rect.top - dp(16)).coerceAtLeast(0))
+            }
+        }
     }
 
     override fun onResume() {

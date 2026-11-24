@@ -13,7 +13,9 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.DecelerateInterpolator
+import android.graphics.drawable.GradientDrawable
 import android.widget.FrameLayout
+import android.widget.TextView
 import com.seashell.gechuang.R
 import com.seashell.gechuang.config.AppLanguage
 import com.seashell.gechuang.logging.GechuangLog
@@ -45,9 +47,24 @@ internal class ControlAreaPager(
         },
     )
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private val tasksCloseButton = TextView(context).apply {
+        text = "返回应用"
+        setTextColor(Color.WHITE)
+        textSize = 12f
+        gravity = Gravity.CENTER
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(14f)
+            setColor(Color.argb(230, 8, 14, 18))
+            setStroke(dp(1f).toInt(), Color.argb(120, 255, 255, 255))
+        }
+        visibility = View.GONE
+        elevation = dp(24f)
+        setOnClickListener { showPage(0) }
+    }
     private val minimumVelocity = ViewConfiguration.get(context).scaledMinimumFlingVelocity * 2
     private val maximumVelocity = ViewConfiguration.get(context).scaledMaximumFlingVelocity
-    private val tabLabels = listOf(R.string.control_page_tasks, R.string.control_page_functions, R.string.control_page_video)
+    private val tabLabels = listOf(R.string.control_page_tasks, R.string.control_page_functions)
     private val boundaryDivider = View(context).apply {
         setBackgroundColor(Color.argb(90, 255, 255, 255))
         isClickable = false
@@ -77,12 +94,9 @@ internal class ControlAreaPager(
         isFocusable = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
         functions.setOnVideoActionRequested {
-            if (embedded) {
-                video.releaseVideo()
-            } else {
-                showPage(1)
-                if (video.canCaptureVideo()) video.captureVideo()
-            }
+            // The video page is intentionally removed. Video stays available
+            // through the normal app/slot flow instead of a hidden top-bar page.
+            if (embedded) video.releaseVideo()
         }
         functions.setOnControlsChanged { updatePageLabels() }
         fun pageParams() = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
@@ -92,6 +106,10 @@ internal class ControlAreaPager(
         addView(tasks, pageParams())
         // Keep the workspace boundary fixed as the pages slide.
         addView(boundaryDivider, LayoutParams(LayoutParams.MATCH_PARENT, dp(1f).toInt().coerceAtLeast(1), Gravity.BOTTOM))
+        addView(tasksCloseButton, LayoutParams(dp(88f).toInt(), dp(32f).toInt(), Gravity.BOTTOM or Gravity.END).apply {
+            bottomMargin = dp(2f).toInt()
+            marginEnd = dp(8f).toInt()
+        })
         updatePagePositions()
     }
 
@@ -109,6 +127,7 @@ internal class ControlAreaPager(
 
     fun setWorkspaceState(visible: Boolean, locked: Boolean) {
         tasks.setWorkspaceVisible(visible && !locked)
+        functions.setWorkspaceVisible(visible && !locked)
         if (!visible || locked) {
             cancelGesture()
             showPage(0, animate = false)
@@ -117,6 +136,10 @@ internal class ControlAreaPager(
     }
 
     fun refreshHost() = video.refreshHost()
+
+    fun toggleTasksPage() {
+        if (selectedPage == -1) showPage(0) else showPage(-1)
+    }
 
     fun openDockedPip(taskId: Int) = video.openDockedPip(taskId)
 
@@ -232,31 +255,10 @@ internal class ControlAreaPager(
 
     private fun tryStartPageDrag(event: MotionEvent): Boolean {
         if (isInternalDragActive()) return false
-        if (event.actionMasked != MotionEvent.ACTION_MOVE || verticalGesture) return false
-        val index = event.findPointerIndex(activePointerId)
-        if (index < 0) return false
-        val dx = event.getX(index) - downX
-        val dy = event.getY(index) - downY
-        if (abs(dy) > touchSlop && abs(dy) > abs(dx)) {
-            verticalGesture = true
-            return false
-        }
-        if (abs(dx) <= touchSlop || abs(dx) <= abs(dy) * 1.2f) return false
-        val direction = if (dx < 0f) 1 else -1
-        if (selectedPage == 0 && functions.canScrollHorizontallyAt(downX - functions.translationX, downY, direction)) return false
-        if (selectedPage == -1 && tasks.canScrollHorizontallyAt(downX - tasks.translationX, downY, direction)) return false
-        if ((pageOffset <= -width && dx > 0f) || (pageOffset >= width && dx < 0f)) return false
-        dragging = true
-        // Start at the handoff point, excluding distance already consumed by app scrolling.
-        downX = event.getX(index)
-        downY = event.getY(index)
-        gestureOffset = pageOffset
-        velocity?.clear()
-        velocity?.addMovement(event)
-        // A scrolling/dragging child may disallow interception. ViewGroup honors that
-        // before reaching here; the app strip only releases it at its own scroll edge.
-        parent?.requestDisallowInterceptTouchEvent(true)
-        return true
+        // Pages no longer follow horizontal swipes. The tasks page is opened
+        // only from the fixed recents button, so a stray swipe over the app
+        // strip can never hide the video/main controls.
+        return false
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -341,7 +343,9 @@ internal class ControlAreaPager(
     }
 
     private fun showPage(page: Int, animate: Boolean = true) {
-        selectedPage = page.coerceIn(-1, 1)
+        selectedPage = page.coerceIn(-1, 0)
+        tasksCloseButton.visibility = if (selectedPage == -1) View.VISIBLE else View.GONE
+        if (selectedPage == -1) tasksCloseButton.bringToFront()
         settleAnimator?.cancel()
         settleAnimator = null
         val target = selectedPage * width.toFloat()

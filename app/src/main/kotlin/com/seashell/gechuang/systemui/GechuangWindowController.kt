@@ -10,7 +10,9 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
+import android.view.Display
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.WindowManager
@@ -23,6 +25,8 @@ import com.seashell.gechuang.display.SlotTaskDrag
 import com.seashell.gechuang.display.VirtualDisplaySlot
 import com.seashell.gechuang.display.WORKSPACE_SLOT_COUNT
 import com.seashell.gechuang.framework.TaskSurfaceCompat
+import com.seashell.gechuang.framework.InputInjectionCompat
+import com.seashell.gechuang.framework.ActivityTaskManagerCompat
 import com.seashell.gechuang.logging.GechuangLog
 import com.seashell.gechuang.safety.FeatureGate
 import com.seashell.gechuang.task.MainTaskPresentationCoordinator
@@ -38,6 +42,7 @@ class GechuangWindowController(
     private val mainTaskPresenter: MainTaskPresentationCoordinator,
     private val onSidebarSideRequested: (SidebarSide) -> Unit,
     private val onSettingsRequested: () -> Unit,
+    private val onAddAppRequested: () -> Unit,
     private val onExitRequested: () -> Unit,
     private val onViewportChanged: () -> Unit,
 ) {
@@ -55,8 +60,47 @@ class GechuangWindowController(
     private var sidebarView: FrameLayout? = null
     private var contentHighlightView: View? = null
     private var slotWindows: List<VirtualDisplaySlot> = emptyList()
+    private val activeSlotViews = mutableListOf<ActiveSlotView>()
+    private var activeSlotView: ActiveSlotView? = null
+    private var activeExitChip: android.widget.TextView? = null
+    private var activeSlotIndex: Int? = null
+    private var activeSlotTaskId: Int? = null
+    private var activeSideExitOverlay: View? = null
+    private var suspendedMainTaskId: Int? = null
+    private var lastMainTaskId: Int? = null
+    private val activeSlotListener = object : ActiveSlotView.Listener {
+        override fun onActiveSurfaceReady(view: ActiveSlotView) {
+            if (activeSlotIndexFor(view) == activeSlotIndex) attachActiveSurface()
+        }
+
+        override fun onActiveSurfaceDestroyed(view: ActiveSlotView) {
+            val index = activeSlotIndexFor(view)
+            if (index < 0) return
+            slotWindows.getOrNull(index)?.clearActiveOutput()
+        }
+
+        override fun onActiveTouch(view: ActiveSlotView, event: MotionEvent) {
+            val index = activeSlotIndexFor(view)
+            GechuangLog.info(
+                "slot_overlay",
+                "Active touch slot=$index current=$activeSlotIndex action=${event.actionMasked}",
+            )
+            if (index != activeSlotIndex) return
+            injectActiveTouch(view, event)
+        }
+
+        override fun onExitRequested(view: ActiveSlotView) {
+            GechuangLog.info("slot_overlay", "Exit requested from active slot=${activeSlotIndex}")
+            slotCoordinator?.deactivateSlotOverlay()
+        }
+    }
     private var slotBackgroundSwipeEnabled = true
     private var frostStrength = 50
+
+    private fun activeSlotIndexFor(view: ActiveSlotView): Int = activeSlotViews.indexOfFirst { it === view }
+
+    private fun activeWindowView(): View? =
+        records.firstOrNull { it.title == "GechuangActiveSlot" }?.view
     private val swapAnimator = WorkspaceSwapAnimator(context)
     private val internalDrag = WorkspaceInternalDragController(
         context, ::geometry, { slotWindows.map { it.view } },
@@ -133,6 +177,14 @@ class GechuangWindowController(
         cancelPendingRotationDraw()
         cancelPendingResumeContent()
         suspended = true
+        showSidebarExitOverlay(false)
+        suspendedMainTaskId = mainTaskPresenter.currentTaskId()
+            ?: lastMainTaskId
+            ?: taskRepository.runningTasks()
+                .firstOrNull {
+                    it.displayId == Display.DEFAULT_DISPLAY &&
+                        it.component.packageName != "com.miui.home"
+                }?.taskId
         cancelDragVisuals()
         clearHomePreview()
         backdropGeneration.incrementAndGet()
@@ -161,6 +213,10 @@ class GechuangWindowController(
         applyWindowGeometry(geometry, refreshControls = false)
         sidebarView?.let { applySlotLayout(it, geometry) }
         records.forEach { record ->
+            if (record.title == "GechuangActiveSlot" && activeSlotIndex == null) {
+                record.view.visibility = View.GONE
+                return@forEach
+            }
             record.view.animate().cancel()
             record.view.visibility = View.VISIBLE
             record.view.alpha = 1f
@@ -168,6 +224,12 @@ class GechuangWindowController(
             record.view.translationY = 0f
         }
         resumeContentAfterFrame()
+        (suspendedMainTaskId ?: mainTaskPresenter.currentTaskId())?.let { taskId ->
+            taskRepository.bringTaskToFront(taskId).onFailure {
+                GechuangLog.warn("workspace_unlock", "Unable to restore main task=$taskId", it)
+            }
+        }
+        if (activeSlotIndex != null) showSidebarExitOverlay(true)
         return geometry
     }
 
@@ -236,8 +298,14 @@ class GechuangWindowController(
         initializeIfNeeded()
         check(records.size == EXPECTED_WINDOW_COUNT) { "SystemUI windows are unavailable" }
         workspaceVisible = true
-        reconfigure().getOrThrow()
+        taskRepository.foregroundTask()
+            ?.takeIf { it.component.packageName != "com.miui.home" }
+            ?.let { lastMainTaskId = it.taskId }
         records.forEach { record ->
+            if (record.title == "GechuangActiveSlot" && activeSlotIndex == null) {
+                record.view.visibility = View.GONE
+                return@forEach
+            }
             val view = record.view
             view.animate().cancel()
             view.visibility = View.VISIBLE
@@ -260,6 +328,7 @@ class GechuangWindowController(
         topAppStrip?.refresh()
         if (FeatureGate.VIRTUAL_DISPLAY_SLOTS.defaultEnabled) {
             slotCoordinator?.activate()
+            slotCoordinator?.setSuspended(false)
         }
         return geometry()
     }
@@ -272,7 +341,10 @@ class GechuangWindowController(
         clearHomePreview()
         suspended = false
         backdropGeneration.incrementAndGet()
-        slotCoordinator?.deactivate()
+        // Keep the side VirtualDisplays and their activities alive. Releasing
+        // them here was the second cause of the "re-enter/splash again" effect.
+        slotCoordinator?.setSuspended(true)
+        activeSlotView?.hide()
         topAppStrip?.setWorkspaceVisible(false)
         controlAreaPager?.setWorkspaceState(visible = false, locked = false)
         records.forEach { record ->
@@ -298,15 +370,270 @@ class GechuangWindowController(
         }
     }
 
-    fun launchInSlot(intent: Intent): Result<Unit> {
-        if (!FeatureGate.VIRTUAL_DISPLAY_SLOTS.defaultEnabled) {
+    /** Side slot was promoted by the coordinator: show its existing virtual
+     * display on the one full-size active TextureView. No task is moved. */
+    internal fun showActiveSlot(slotIndex: Int, taskId: Int) {
+        val previous = activeSlotIndex
+        if (previous != null && previous != slotIndex) {
+            activeSlotViews.getOrNull(previous)?.hide()
+            slotWindows.getOrNull(previous)?.let { slot ->
+                slot.view.hideMainMirror()
+                slot.clearActiveOutput()
+                slot.usePreviewOutput()
+            }
+        }
+        activeSlotIndex = slotIndex
+        activeSlotTaskId = taskId
+        val slot = slotWindows.getOrNull(slotIndex) ?: return
+        val geometry = slot.geometry() ?: return
+        val displayId = slot.displayId() ?: return
+        val view = activeSlotViews.getOrNull(slotIndex) ?: return
+        activeSlotView = view
+        // Keep exactly one hit-testable active surface. Six alpha=0 TextureViews
+        // stacked in one window can otherwise swallow the first ACTION_DOWN.
+        activeSlotViews.forEachIndexed { index, candidate ->
+            if (index != slotIndex) candidate.hideImmediately()
+        }
+        activeWindowView()?.let { windowView ->
+            windowView.animate().cancel()
+            windowView.alpha = 1f
+            windowView.visibility = View.VISIBLE
+            if (windowView is android.view.ViewGroup) {
+                val chip = activeExitChip ?: android.widget.TextView(context).apply {
+                    text = "返回主格"
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 14f
+                    gravity = android.view.Gravity.CENTER
+                    setPadding(dp(12).toInt(), dp(8).toInt(), dp(12).toInt(), dp(8).toInt())
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.argb(190, 18, 30, 36))
+                        cornerRadius = dp(18)
+                        setStroke(dp(1).toInt(), android.graphics.Color.argb(120, 255, 255, 255))
+                    }
+                    isClickable = true
+                    setOnClickListener {
+                        GechuangLog.info("slot_overlay", "Exit requested from chip")
+                        slotCoordinator?.deactivateSlotOverlay()
+                    }
+                }.also {
+                    activeExitChip = it
+                    windowView.addView(it, android.widget.FrameLayout.LayoutParams(dp(104).toInt(), dp(38).toInt(),
+                        android.view.Gravity.TOP or android.view.Gravity.END).apply {
+                        topMargin = dp(10).toInt()
+                        marginEnd = dp(10).toInt()
+                    })
+                }
+                chip.visibility = View.VISIBLE
+                chip.bringToFront()
+            }
+        }
+        view.showInWindow(displayId, geometry.width, geometry.height)
+        attachActiveSurface()
+        updateContentPanelTouchable()
+        showMainMirrorOnSlot(slot, slotIndex)
+        showSidebarExitOverlay(true)
+        GechuangLog.info(
+            "slot_overlay",
+            "Window showing slot=$slotIndex task=$taskId display=$displayId " +
+                "content=${contentRect()} canvas=${geometry.width}x${geometry.height}",
+        )
+    }
+
+    internal fun hideActiveSlot() {
+        val previous = activeSlotIndex
+        activeSlotIndex = null
+        activeSlotTaskId = null
+        activeSlotView?.hide()
+        activeSlotView = null
+        activeExitChip?.visibility = View.GONE
+        // Do not leave an invisible full-size layer over the main app. A
+        // transparent window that is still attached can swallow the first touch
+        // on some MIUI builds, which makes the main task look frozen.
+        activeWindowView()?.let { windowView ->
+            windowView.animate().cancel()
+            windowView.alpha = 0f
+            windowView.visibility = View.GONE
+        }
+        previous?.let { index ->
+            slotWindows.getOrNull(index)?.let { slot ->
+                slot.view.hideMainMirror()
+                slot.clearActiveOutput()
+                slot.usePreviewOutput()
+            }
+        }
+        updateContentPanelTouchable()
+        showSidebarExitOverlay(false)
+        GechuangLog.info("slot_overlay", "Window hiding previous=$previous")
+    }
+
+    private fun showSidebarExitOverlay(show: Boolean) {
+        GechuangLog.info(
+            "slot_overlay",
+            "Sidebar exit layer request show=$show records=${records.map { it.title }} sidebar=${sidebarView != null}",
+        )
+        val existing = activeSideExitOverlay
+        if (!show) {
+            if (existing != null) {
+                runCatching { windowManager.removeViewImmediate(existing) }
+                activeSideExitOverlay = null
+            }
+            return
+        }
+        if (existing != null) return
+        val sidebarRecord = records.firstOrNull { it.title == "GechuangSidebar" } ?: run {
+            GechuangLog.warn("slot_overlay", "Sidebar record is unavailable for exit layer")
+            return
+        }
+        val source = sidebarRecord.view.layoutParams as? WindowManager.LayoutParams ?: run {
+            GechuangLog.warn(
+                "slot_overlay",
+                "Sidebar layout params are ${sidebarRecord.view.layoutParams?.javaClass?.name}",
+            )
+            return
+        }
+        val geometry = geometry()
+        val view = View(context).apply {
+            isClickable = true
+            isFocusable = false
+            setBackgroundColor(Color.TRANSPARENT)
+            contentDescription = "返回主格"
+            setOnClickListener {
+                GechuangLog.info("slot_overlay", "Exit requested from sidebar tap")
+                slotCoordinator?.deactivateSlotOverlay()
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            geometry.sidebarWidth,
+            geometry.contentHeight,
+            source.type,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+            x = if (sidebarSide == SidebarSide.LEFT) 0 else geometry.contentRight
+            y = geometry.topHeight
+            title = "GechuangSideExit"
+            setFitInsetsTypes(0)
+        }
+        runCatching {
+            windowManager.addView(view, params)
+            activeSideExitOverlay = view
+            GechuangLog.info("slot_overlay", "Sidebar exit layer added x=${params.x} w=${params.width}")
+        }.onFailure {
+            GechuangLog.warn("slot_overlay", "Unable to add sidebar exit layer", it)
+        }
+    }
+
+    private fun showMainMirrorOnSlot(slot: VirtualDisplaySlot, slotIndex: Int) {
+        val mainTaskId = mainTaskPresenter.currentTaskId()
+            ?: taskRepository.runningTasks()
+                .firstOrNull { it.displayId == Display.DEFAULT_DISPLAY }?.taskId
+        if (mainTaskId != null) lastMainTaskId = mainTaskId
+        if (mainTaskId == null) {
+            slot.view.hideMainMirror()
+            GechuangLog.warn("slot_overlay", "No main task for slot=$slotIndex mirror")
+            return
+        }
+        val width = slot.view.textureView.width.takeIf { it > 0 } ?: slot.view.width
+        val height = slot.view.textureView.height.takeIf { it > 0 } ?: slot.view.height
+        if (width <= 0 || height <= 0) {
+            GechuangLog.warn("slot_overlay", "Side preview has no size slot=$slotIndex")
+            return
+        }
+        val bounds = TaskSurfaceCompat.taskBoundsForMirror(mainTaskId) ?: Rect()
+        val currentGeometry = geometry()
+        slot.view.showMainMirror(
+            mainTaskId,
+            bounds,
+            width,
+            height,
+            currentGeometry.contentScale,
+            currentGeometry.contentTranslationX,
+            currentGeometry.contentTranslationY,
+        )
+        GechuangLog.info(
+            "slot_overlay",
+            "Mirroring main task=$mainTaskId into slot=$slotIndex preview=${width}x$height " +
+                "sourceScale=${currentGeometry.contentScale}",
+        )
+    }
+
+    private fun attachActiveSurface() {
+        val index = activeSlotIndex ?: return
+        val view = activeSlotView ?: return
+        if (!view.isSurfaceReady) return
+        val slot = slotWindows.getOrNull(index) ?: return
+        val geometry = slot.geometry() ?: return
+        val texture = view.surfaceTexture ?: return
+        slot.useActiveOutput(texture, geometry.width, geometry.height)
+        GechuangLog.info("slot_overlay", "Attached active surface slot=$index display=${slot.displayId()}")
+    }
+
+    private fun injectActiveTouch(view: ActiveSlotView, event: MotionEvent) {
+        val index = activeSlotIndex ?: return
+        val slot = slotWindows.getOrNull(index) ?: return
+        val displayId = slot.displayId() ?: return
+        val geometry = slot.geometry() ?: return
+        val width = view.textureView.width
+        val height = view.textureView.height
+        if (width <= 0 || height <= 0) return
+        GechuangLog.info(
+            "slot_overlay",
+            "Touch action=${event.actionMasked} local=${event.x},${event.y} view=${width}x$height " +
+                "display=$displayId canvas=${geometry.width}x${geometry.height}",
+        )
+        InputInjectionCompat.injectMotion(
+            displayId = displayId,
+            event = event,
+            scaleX = geometry.width.toFloat() / width,
+            scaleY = geometry.height.toFloat() / height,
+        )
+    }
+
+    private fun contentRect(): Rect {
+        val geometry = geometry()
+        return Rect(geometry.contentLeft, geometry.contentTop, geometry.contentRight, geometry.contentBottom)
+    }
+
+    private fun updateContentPanelTouchable() {
+        // The active slot lives in its own content-sized window; the transparent
+        // content panel must stay non-touchable so the main app keeps receiving input.
+        val record = records.firstOrNull { it.title == "GechuangActiveSlot" } ?: return
+        val params = record.view.layoutParams as? WindowManager.LayoutParams ?: return
+        val touchable = activeSlotIndex != null && !suspended
+        params.flags = if (touchable) params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        else params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        // TYPE_PHONE carries a legacy 0.8 alpha on this ROM. When the active
+        // slot is hidden, the window must be fully transparent as well as
+        // non-touchable; otherwise a stale layer can block the main app.
+        params.alpha = if (touchable) 1.0f else 0.0f
+        windowManager.updateViewLayout(record.view, params)
+        GechuangLog.info(
+            "slot_overlay",
+            "Active window touchable=$touchable active=$activeSlotIndex alpha=${params.alpha} " +
+                "flags=0x${Integer.toHexString(params.flags)}",
+        )
+    }
+
+    fun launchInSlot(intent: Intent): Result<Unit> {        if (!FeatureGate.VIRTUAL_DISPLAY_SLOTS.defaultEnabled) {
             return Result.failure(IllegalStateException("VirtualDisplay slot feature disabled"))
         }
         return slotCoordinator?.launchInSlot(intent)
             ?: Result.failure(IllegalStateException("VirtualDisplay slot unavailable"))
     }
 
+    fun openTaskInSlot(taskId: Int, userId: Int, component: android.content.ComponentName): Boolean {
+        if (!FeatureGate.VIRTUAL_DISPLAY_SLOTS.defaultEnabled) return false
+        return slotCoordinator?.openTaskInSlot(taskId, userId, component) == true
+    }
+
     fun onTasksChanged() {
+        taskRepository.foregroundTask()
+            ?.takeIf { it.component.packageName != "com.miui.home" }
+            ?.let { lastMainTaskId = it.taskId }
         slotCoordinator?.onTasksChanged()
         if (workspaceVisible && !suspended) controlAreaPager?.onTasksChanged()
     }
@@ -451,6 +778,8 @@ class GechuangWindowController(
                 },
                 onSidebarSideRequested = onSidebarSideRequested,
                 onSettingsRequested = onSettingsRequested,
+                onTasksRequested = { controlAreaPager?.toggleTasksPage() },
+                onAddAppRequested = onAddAppRequested,
                 onExitRequested = onExitRequested,
                 onFrostStrengthChanged = { strength ->
                     if (frostStrength != strength) {
@@ -469,6 +798,7 @@ class GechuangWindowController(
                 ControlAreaPager(
                     context, strip,
                     onTaskClicked = { task ->
+                        controlAreaPager?.toggleTasksPage()
                         slotCoordinator?.openRecentInMain(task,
                             autoMinimizeCurrent = SystemUiRuntime.shouldAutoMinimizeMainOnTopAppSwitch())
                             ?.onFailure { error ->
@@ -525,6 +855,35 @@ class GechuangWindowController(
             y = geometry.topHeight,
             windowType = windowType,
         )
+        addWindow(
+            title = "GechuangActiveSlot",
+            view = FrameLayout(context).apply {
+                setBackgroundColor(Color.TRANSPARENT)
+                activeSlotViews.clear()
+                repeat(WORKSPACE_SLOT_COUNT) { index ->
+                    val activeView = ActiveSlotView(context).apply {
+                        setListener(activeSlotListener)
+                        alpha = 0f
+                        visibility = View.INVISIBLE
+                    }
+                    activeSlotViews += activeView
+                    addView(
+                        activeView,
+                        FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                }
+            },
+            width = geometry.contentWidth,
+            height = geometry.contentHeight,
+            gravity = Gravity.TOP or Gravity.LEFT,
+            x = geometry.contentLeft,
+            y = geometry.contentTop,
+            touchable = true,
+            windowType = windowType,
+        )
         if (records.size != EXPECTED_WINDOW_COUNT) {
             records.forEach { record ->
                 try {
@@ -539,6 +898,10 @@ class GechuangWindowController(
             controlAreaPager = null
             sidebarView = null
             contentHighlightView = null
+            activeSlotView = null
+            activeSlotViews.clear()
+            activeSlotIndex = null
+            activeSlotTaskId = null
             slotWindows = emptyList()
             initialized = false
         }
@@ -550,6 +913,7 @@ class GechuangWindowController(
         width: Int,
         height: Int,
         gravity: Int,
+        x: Int = 0,
         y: Int = 0,
         touchable: Boolean = false,
         windowType: Int,
@@ -567,6 +931,7 @@ class GechuangWindowController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             this.gravity = gravity
+            this.x = x
             this.y = y
             this.title = title
             // A change in display axes is not a physical panel move. WM's default
@@ -576,7 +941,7 @@ class GechuangWindowController(
                 privateFlags.setInt(this, privateFlags.getInt(this) or 0x40) // PRIVATE_FLAG_NO_MOVE_ANIMATION
             }.onFailure { GechuangLog.warn("systemui_window", "Unable to disable panel move animation", it) }
         }
-        val hostedView = if (title == "GechuangContentPanel") view
+        val hostedView = if (title == "GechuangContentPanel" || title == "GechuangActiveSlot") view
             else WorkspacePanelHost(context, view, managesTouchRegion = title == "GechuangSidebar")
         val record = WindowRecord(hostedView, title)
         configureWindow(record, params, geometry())
@@ -614,9 +979,11 @@ class GechuangWindowController(
         geometry: WorkspaceGeometry,
     ) {
         val touchable = !suspended && (record.title == "GechuangTopBar" ||
-            (record.title == "GechuangSidebar" && FeatureGate.TASK_SWAP.defaultEnabled))
+            (record.title == "GechuangSidebar" && FeatureGate.TASK_SWAP.defaultEnabled) ||
+            record.title == "GechuangActiveSlot")
         params.flags = if (touchable) params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         else params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        if (record.title == "GechuangActiveSlot") params.alpha = 1.0f
         // A foreground app normally hides live wallpaper, so screenshotWallpaper()
         // has no surface to read on entry. Keep that surface available behind the
         // workspace until exit/lock, without sending control gestures to it.
@@ -687,6 +1054,15 @@ class GechuangWindowController(
                 params.x = 0
                 params.y = 0
             }
+            "GechuangActiveSlot" -> {
+                params.width = geometry.contentWidth
+                // Leave the system gesture strip uncovered; otherwise the active
+                // TextureView eats the bottom-up recents gesture before SystemUI
+                // can start its transition.
+                params.height = (geometry.contentHeight - dp(18).toInt()).coerceAtLeast(1)
+                params.x = geometry.contentLeft
+                params.y = geometry.contentTop
+            }
         }
     }
 
@@ -728,6 +1104,13 @@ class GechuangWindowController(
                     internalDrag.start(source, WorkspaceInternalDragController.Payload.Slot(drag))
                 },
                 onInternalDragTouch = internalDrag::touch,
+                onActiveSlotChanged = { slotIndex, taskId ->
+                    if (slotIndex == null || taskId == null) {
+                        hideActiveSlot()
+                    } else {
+                        showActiveSlot(slotIndex, taskId)
+                    }
+                },
             )
         }
     }
@@ -835,8 +1218,7 @@ class GechuangWindowController(
         val backdrop = WorkspaceWallpaperBackdrop.crop(wallpaperBitmap, 0, 0, frostStrength)
         val mainTaskId = if (targetIndex == null) mainTaskPresenter.currentTaskId() else null
         val mainPreview = mainTaskId?.let {
-            TaskSurfaceCompat.capturePreview(it, Rect(geometry.availableLeft, geometry.availableTop,
-                geometry.availableRight, geometry.availableBottom))
+            TaskSurfaceCompat.capturePreview(it, mainRect)
         }
         fun slotPreview(slot: VirtualDisplaySlot): android.graphics.Bitmap? {
             val source = slot.sourceBounds()
@@ -852,6 +1234,11 @@ class GechuangWindowController(
         }
         val needsTargetPreview = !parkingMain && (targetOccupied || mainTaskId != null)
         if (sourcePreview == null || (needsTargetPreview && targetPreview == null)) {
+            GechuangLog.warn(
+                "workspace_swap",
+                "Swap preview missing source=${sourcePreview != null} target=${targetPreview != null} " +
+                    "parkingMain=$parkingMain targetIndex=$targetIndex mainTaskId=$mainTaskId",
+            )
             sourcePreview?.recycle()
             if (targetPreview !== sourcePreview) targetPreview?.recycle()
             withoutPreview()
@@ -882,6 +1269,7 @@ class GechuangWindowController(
                 stationaryBackground = stationaryBackground,
                 durationMs = SystemUiRuntime.swapAnimationDurationMs(),
                 returningHome = parkingMain,
+                stabilizeMain = !parkingMain,
                 move = {
                     // Ignore frames produced while the old tasks were still in
                     // place. Handoff needs a buffer after the logical exchange.
@@ -903,7 +1291,13 @@ class GechuangWindowController(
                     } else if (parkingMain) {
                         returningHomePackage != null &&
                             taskRepository.foregroundTask()?.component?.packageName == returningHomePackage
-                    } else mainTaskPresenter.currentTaskId() == incomingTaskId
+                    } else {
+                        val promoted = taskRepository.findTask(incomingTaskId ?: -1)
+                        promoted != null &&
+                            mainTaskPresenter.currentTaskId() == incomingTaskId &&
+                            promoted.visible &&
+                            !promoted.component.className.contains("Splash", ignoreCase = true)
+                    }
                     sourceReady && targetReady
                 },
                 onFinished = {
@@ -1000,6 +1394,10 @@ class GechuangWindowController(
                 topMargin = bounds[index].top
             }
         }
+        activeSlotIndex?.let { index ->
+            val slotGeometry = slotWindows.getOrNull(index)?.geometry() ?: return@let
+            activeSlotView?.updateWindowContent(slotGeometry.width, slotGeometry.height)
+        }
     }
 
     private fun refreshWallpaperBackdrop(attempt: Int = 0) {
@@ -1086,7 +1484,8 @@ class GechuangWindowController(
     private val transitionInterpolator = WorkspaceTransitionSpec.interpolator
 
     private companion object {
-        const val EXPECTED_WINDOW_COUNT = 3
+        const val EXPECTED_WINDOW_COUNT = 4
+        const val ACTIVE_SLOT_HIDE_SETTLE_MS = 150L
         const val BACKDROP_SETTLE_REFRESHES = 2
         const val BACKDROP_MAX_RETRIES = 8
         const val HOME_PREVIEW_SETTLE_DELAY_MS = 100L

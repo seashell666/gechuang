@@ -15,6 +15,7 @@ object TriggerBroadcastContract {
     const val ACTION_SYSTEMUI_SET_WORKSPACE = "com.seashell.gechuang.action.SYSTEMUI_SET_WORKSPACE"
     const val ACTION_LAUNCH_SLOT_TEST = "com.seashell.gechuang.action.LAUNCH_SLOT_TEST"
     const val ACTION_LAUNCHER_APP_REQUEST = "com.seashell.gechuang.action.LAUNCHER_APP_REQUEST"
+    const val ACTION_LAUNCHER_TASK_TO_SLOT = "com.seashell.gechuang.action.LAUNCHER_TASK_TO_SLOT"
     const val ACTION_FOUR_FINGER_WORKSPACE = "com.seashell.gechuang.action.FOUR_FINGER_WORKSPACE"
     const val CONTROL_PERMISSION = "com.seashell.gechuang.permission.CONTROL_WORKSPACE"
     const val EXTRA_SOURCE = "com.seashell.gechuang.extra.TRIGGER_SOURCE"
@@ -26,6 +27,9 @@ object TriggerBroadcastContract {
     const val EXTRA_RUNTIME_PROTOCOL_VERSION = "com.seashell.gechuang.extra.RUNTIME_PROTOCOL_VERSION"
     const val EXTRA_SLOT_STATES = "com.seashell.gechuang.extra.SLOT_STATES"
     const val EXTRA_LAUNCH_INTENT = "com.seashell.gechuang.extra.LAUNCH_INTENT"
+    const val EXTRA_TASK_ID = "com.seashell.gechuang.extra.TASK_ID"
+    const val EXTRA_TASK_USER_ID = "com.seashell.gechuang.extra.TASK_USER_ID"
+    const val EXTRA_TASK_COMPONENT = "com.seashell.gechuang.extra.TASK_COMPONENT"
     const val EXTRA_LAUNCHER_IDENTITY = "com.seashell.gechuang.extra.LAUNCHER_IDENTITY"
     const val EXTRA_SYSTEMUI_IDENTITY = "com.seashell.gechuang.extra.SYSTEMUI_IDENTITY"
     const val EXTRA_TARGET_USER = "com.seashell.gechuang.extra.TARGET_USER"
@@ -91,6 +95,25 @@ object TriggerBroadcastContract {
         )
         return targetIntent(ACTION_LAUNCHER_APP_REQUEST, SYSTEM_UI_PACKAGE)
             .putExtra(EXTRA_LAUNCH_INTENT, Intent(launchIntent))
+            .putExtra(EXTRA_LAUNCHER_IDENTITY, identity)
+    }
+
+    fun launcherTaskToSlotIntent(
+        context: Context,
+        taskId: Int,
+        userId: Int,
+        component: ComponentName,
+    ): Intent {
+        val identity = PendingIntent.getBroadcast(
+            context,
+            3,
+            Intent(ACTION_LAUNCHER_TASK_TO_SLOT).setPackage(context.packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return targetIntent(ACTION_LAUNCHER_TASK_TO_SLOT, SYSTEM_UI_PACKAGE)
+            .putExtra(EXTRA_TASK_ID, taskId)
+            .putExtra(EXTRA_TASK_USER_ID, userId)
+            .putExtra(EXTRA_TASK_COMPONENT, component)
             .putExtra(EXTRA_LAUNCHER_IDENTITY, identity)
     }
 

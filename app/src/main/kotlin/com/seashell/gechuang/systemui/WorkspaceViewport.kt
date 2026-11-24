@@ -222,8 +222,8 @@ internal class WorkspaceViewport(
 
     private companion object {
         const val MODE_KEY = "navigation_buttons_enabled"
-        const val BUTTONS_PREFIX = "buttons_v1:"
-        const val FULL_PREFIX = "full_v1:"
+        const val BUTTONS_PREFIX = "buttons_v2:"
+        const val FULL_PREFIX = "full_v2:"
         const val MAX_PROFILES = 16
     }
 }

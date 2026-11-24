@@ -46,6 +46,45 @@ object SystemUiRuntime {
     }
     @Volatile private var workspaceConfig = WorkspaceTopConfig()
     @Volatile private var workspaceConfigReady = false
+    @Volatile private var recentsSuspended = false
+    private var lastForegroundTaskId: Int? = null
+    private val homeMonitorRepository by lazy {
+        com.seashell.gechuang.task.TaskRepository(applicationContext)
+    }
+    private val homeMonitor = object : Runnable {
+        override fun run() {
+            try {
+                if (::workspaceController.isInitialized && workspaceController.isActive() &&
+                    !workspaceController.isSuspended() && !recentsSuspended
+                ) {
+                    val top = homeMonitorRepository.foregroundTask()
+                    val previous = lastForegroundTaskId
+                    if (previous != top?.taskId) {
+                        GechuangLog.info(
+                            "workspace_recents_handoff",
+                            "Foreground changed prev=$previous now=${top?.taskId} pkg=${top?.component?.packageName} " +
+                                "active=${workspaceController.isActive()} suspended=${workspaceController.isSuspended()}",
+                        )
+                    }
+                    val isLauncher = top?.component?.packageName == "com.miui.home"
+                    if (isLauncher && previous != null && previous != top?.taskId) {
+                        GechuangLog.info(
+                            "workspace_recents_handoff",
+                            "Launcher/recents took focus previous=$previous now=${top?.taskId}; suspending workspace",
+                        )
+                        onSystemRecentsStarted()
+                    }
+                    lastForegroundTaskId = top?.taskId
+                } else {
+                    lastForegroundTaskId = homeMonitorRepository.foregroundTask()?.taskId
+                }
+            } catch (error: Throwable) {
+                GechuangLog.warn("workspace_recents_handoff", "Launcher focus monitor failed", error)
+            } finally {
+                lifecycleHandler.postDelayed(this, 350)
+            }
+        }
+    }
     private val configRetry = Runnable { refreshWorkspaceConfig() }
     private val taskRefreshQueued = AtomicBoolean(false)
     private val taskRefresh = Runnable {
@@ -55,6 +94,21 @@ object SystemUiRuntime {
 
     fun onTasksChanged() {
         if (taskRefreshQueued.compareAndSet(false, true)) lifecycleHandler.post(taskRefresh)
+    }
+
+    /** Called from the Shell recents transition before its animation starts. */
+    fun onSystemRecentsStarted() {
+        lifecycleHandler.post {
+            if (!::workspaceController.isInitialized || !workspaceController.isActive() ||
+                workspaceController.isSuspended() || recentsSuspended) return@post
+            // The bottom swipe does not send ACTION_CLOSE_SYSTEM_DIALOGS on MIUI.
+            // Hide our overlay windows and release virtual-display composition
+            // before recents draws its first frame.
+            recentsSuspended = true
+            workspaceController.suspendForLock()
+            publishWorkspaceSurfaceState(false)
+            GechuangLog.info("workspace", "Suspended for system recents gesture; tasks retained")
+        }
     }
     private val configReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -138,6 +192,11 @@ object SystemUiRuntime {
         override fun run() {
             lifecycleHandler.removeCallbacks(this)
             if (!::workspaceController.isInitialized || !workspaceController.isSuspended()) return
+            if (recentsSuspended) {
+                // Recents deliberately suspends the workspace; do not auto-resume
+                // until the user opens a retained-app entry or leaves recents.
+                return
+            }
             val locked = isKeyguardLocked(applicationContext)
             val screenReady = isScreenReady()
             windowController.updateSuspendedOutputs(screenReady)
@@ -186,6 +245,8 @@ object SystemUiRuntime {
         if (!initialized.compareAndSet(false, true)) return
         try {
             applicationContext = context.applicationContext ?: context
+            TopAppRepository.prewarm(applicationContext)
+            lifecycleHandler.postDelayed(homeMonitor, 800)
             LauncherAppCatalogContract.register(applicationContext)
             TaskSurfaceCompat.initializeTaskAccess(applicationContext)
             WorkspaceDisplayTransitionHook.initialize(applicationContext)
@@ -194,7 +255,8 @@ object SystemUiRuntime {
                 context = applicationContext,
                 mainTaskPresenter = mainTaskPresenter,
                 onSidebarSideRequested = ::setSidebarSideFromTopBar,
-                onSettingsRequested = ::openSettingsFromTopBar,
+                onSettingsRequested = { openSettingsFromTopBar() },
+                onAddAppRequested = { openSettingsFromTopBar(openAppPicker = true) },
                 onExitRequested = ::closeWorkspaceFromGesture,
                 onViewportChanged = ::reconfigureForViewport,
             )
@@ -228,7 +290,10 @@ object SystemUiRuntime {
             )
             applicationContext.registerReceiver(
                 launcherRequestReceiver,
-                IntentFilter(TriggerBroadcastContract.ACTION_LAUNCHER_APP_REQUEST),
+                IntentFilter().apply {
+                    addAction(TriggerBroadcastContract.ACTION_LAUNCHER_APP_REQUEST)
+                    addAction(TriggerBroadcastContract.ACTION_LAUNCHER_TASK_TO_SLOT)
+                },
                 Context.RECEIVER_EXPORTED,
             )
             applicationContext.registerReceiver(
@@ -242,6 +307,7 @@ object SystemUiRuntime {
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(Intent.ACTION_USER_PRESENT)
                 addAction(Intent.ACTION_CONFIGURATION_CHANGED)
+                addAction(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)
             }
             runCatching {
                 applicationContext.registerReceiver(
@@ -387,10 +453,11 @@ object SystemUiRuntime {
         }
     }
 
-    private fun openSettingsFromTopBar() {
+    private fun openSettingsFromTopBar(openAppPicker: Boolean = false) {
         val intent = applicationContext.packageManager
             .getLaunchIntentForPackage(TriggerBroadcastContract.MODULE_PACKAGE)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ?.putExtra(com.seashell.gechuang.config.EXTRA_OPEN_APP_PICKER, openAppPicker)
         if (intent == null) {
             GechuangLog.warn("top_settings", "Module launch intent unavailable")
             return
@@ -411,6 +478,21 @@ object SystemUiRuntime {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == Intent.ACTION_USER_PRESENT) refreshWorkspaceConfig()
             if (intent.action == Intent.ACTION_SCREEN_OFF) TaskSurfaceCompat.finishWorkspaceExitAnimations()
+            if (
+                intent.action == Intent.ACTION_CLOSE_SYSTEM_DIALOGS &&
+                intent.getStringExtra("reason") == "recentapps" &&
+                ::workspaceController.isInitialized &&
+                workspaceController.isActive() &&
+                !workspaceController.isSuspended()
+            ) {
+                // Recents is a SystemUI surface; leaving our overlay windows visible
+                // puts the top bar/sidebar on top of MIUI recents. Suspend keeps the
+                // slot displays and their tasks alive for an instant resume.
+                recentsSuspended = true
+                workspaceController.suspendForLock()
+                GechuangLog.info("workspace", "Suspended for recents; slot tasks retained")
+                return
+            }
             if (!::workspaceController.isInitialized || !workspaceController.isActive()) return
             when (intent.action) {
                 Intent.ACTION_SCREEN_OFF -> {
@@ -480,7 +562,8 @@ object SystemUiRuntime {
     }
 
     private fun requestedTarget(intent: Intent): Boolean? = when (intent.action) {
-        TriggerBroadcastContract.ACTION_TOGGLE_WORKSPACE -> !workspaceController.isActive()
+        TriggerBroadcastContract.ACTION_TOGGLE_WORKSPACE ->
+            !workspaceController.isActive() || workspaceController.isSuspended()
         TriggerBroadcastContract.ACTION_SET_WORKSPACE -> intent.getBooleanExtra(
             TriggerBroadcastContract.EXTRA_REQUESTED_ACTIVE,
             false,
@@ -496,9 +579,23 @@ object SystemUiRuntime {
                     intent.getBooleanExtra(TriggerBroadcastContract.EXTRA_ONLY_IF_INACTIVE, false),
                     workspaceController.isActive())) true
             else if (target && isKeyguardLocked(context)) false
-            else workspaceController.setActive(target).also { handled ->
-                // The tile/coordinated path must also restore the separate assistant panel.
-                if (handled) publishWorkspaceSurfaceState(target)
+            else {
+                if (target) {
+                    recentsSuspended = false
+                    if (workspaceController.isSuspended()) {
+                        workspaceController.resumeAfterLock().also { handled ->
+                            if (handled) publishWorkspaceSurfaceState(true)
+                        }
+                    } else {
+                        workspaceController.setActive(true).also { handled ->
+                            if (handled) publishWorkspaceSurfaceState(true)
+                        }
+                    }
+                } else {
+                    workspaceController.setActive(false).also { handled ->
+                        if (handled) publishWorkspaceSurfaceState(false)
+                    }
+                }
             }
         }
         TriggerBroadcastContract.ACTION_QUERY_WORKSPACE -> true
@@ -533,25 +630,83 @@ object SystemUiRuntime {
 
     private val launcherRequestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!::workspaceController.isInitialized || !workspaceController.isActive()) return
+            if (!::workspaceController.isInitialized) return
             val homePackage = TriggerBroadcastContract.resolveHomePackage(context) ?: return
             val launcherIdentity = intent.getParcelableExtra(
                 TriggerBroadcastContract.EXTRA_LAUNCHER_IDENTITY,
                 PendingIntent::class.java,
             )
-            val verifiedSender = sentFromPackage ?: launcherIdentity?.creatorPackage
+            val verifiedSender = launcherIdentity?.creatorPackage
             if (verifiedSender != homePackage) {
                 GechuangLog.warn(
                     "launcher_redirect",
-                    "Rejected sender=$sentFromPackage token=${launcherIdentity?.creatorPackage} " +
-                        "uid=$sentFromUid expected=$homePackage",
+                    "Rejected sender=${verifiedSender ?: "none"} token=${launcherIdentity?.creatorPackage} " +
+                        "uid=${launcherIdentity?.creatorUid} expected=$homePackage",
                 )
                 return
             }
             val launchIntent = intent.getParcelableExtra(
                 TriggerBroadcastContract.EXTRA_LAUNCH_INTENT,
                 Intent::class.java,
-            ) ?: return
+            )
+            if (intent.action == TriggerBroadcastContract.ACTION_LAUNCHER_TASK_TO_SLOT) {
+                val taskId = intent.getIntExtra(TriggerBroadcastContract.EXTRA_TASK_ID, -1)
+                val userId = intent.getIntExtra(TriggerBroadcastContract.EXTRA_TASK_USER_ID, 0)
+                val component = intent.getParcelableExtra(
+                    TriggerBroadcastContract.EXTRA_TASK_COMPONENT,
+                    android.content.ComponentName::class.java,
+                )
+                if (taskId < 0 || component == null) return
+                GechuangLog.info(
+                    "launcher_redirect",
+                    "Task-to-slot request task=$taskId component=$component active=${workspaceController.isActive()}",
+                )
+                val open = {
+                    recentsSuspended = false
+                    when {
+                        !workspaceController.isActive() -> workspaceController.setActive(true)
+                        workspaceController.isSuspended() -> workspaceController.resumeAfterLock()
+                    }
+                    Unit
+                }
+                val tryOpen: (Int) -> Unit = object : (Int) -> Unit {
+                    override fun invoke(attempt: Int) {
+                        if (!workspaceController.isActive()) {
+                            if (attempt > 0) {
+                                Handler(Looper.getMainLooper()).postDelayed({ invoke(attempt - 1) }, 250L)
+                            } else {
+                                GechuangLog.warn("launcher_redirect", "Workspace unavailable for task=$taskId")
+                            }
+                            return
+                        }
+                        if (workspaceController.openTaskInSlot(taskId, userId, component)) {
+                            GechuangLog.info("launcher_redirect", "Opened recents task=$taskId in slot")
+                            return
+                        }
+                        if (attempt > 0) {
+                            Handler(Looper.getMainLooper()).postDelayed({ invoke(attempt - 1) }, 250L)
+                        } else {
+                            GechuangLog.warn(
+                                "launcher_redirect",
+                                "No slot became ready for recents task=$taskId",
+                            )
+                        }
+                    }
+                }
+                if (workspaceController.isActive()) {
+                    open()
+                    tryOpen(12)
+                } else {
+                    // Slots become ready asynchronously after activation. Give the
+                    // DisplayManager a short settle window instead of dropping the card.
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        open()
+                        tryOpen(12)
+                    }, 500L)
+                }
+                return
+            }
+            if (launchIntent == null) return
             if (!workspaceController.openFromLauncher(launchIntent)) {
                 GechuangLog.warn(
                     "launcher_redirect",

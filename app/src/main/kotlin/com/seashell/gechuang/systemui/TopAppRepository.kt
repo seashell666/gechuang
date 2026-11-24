@@ -27,6 +27,19 @@ class TopAppRepository(context: Context) {
 
     fun load(preferredComponents: List<String> = emptyList(),
         manualOrder: Boolean = preferredComponents.isNotEmpty()): Snapshot {
+        val cached = cachedSnapshot
+        if (cached != null) {
+            if (!manualOrder) return cached
+            val order = preferredComponents.withIndex()
+                .associate { (index, value) -> value to index }
+            val selected = cached.visibleApps.asSequence()
+                .filter { it.key in order }
+                .sortedBy { entry -> order[entry.key] ?: Int.MAX_VALUE }
+                .toList()
+            if (selected.size == preferredComponents.size) {
+                return Snapshot(selected, cached.obstacleIcons)
+            }
+        }
         val catalogue = apps.load()
         val usage = catalogue.map { it.userId }.distinct().associateWith { userId ->
             apps.contextForUser(userId)?.let(::recentUsage).orEmpty()
@@ -59,7 +72,7 @@ class TopAppRepository(context: Context) {
                 }
             }
             .take(MAX_VISIBLE_APPS)
-        return Snapshot(visibleApps, obstacleIcons(catalogue))
+        return Snapshot(visibleApps, obstacleIcons(catalogue)).also { cachedSnapshot = it }
     }
 
     private fun obstacleIcons(catalogue: List<LauncherAppRepository.AppEntry>): Map<String, Bitmap> {
@@ -90,9 +103,20 @@ class TopAppRepository(context: Context) {
             .mapValues { (_, stats) -> stats.lastTimeUsed }
     }.getOrDefault(emptyMap())
 
-    private companion object {
-        const val MAX_VISIBLE_APPS = 36
-        const val OBSTACLE_ICON_SIZE = 64
-        const val USAGE_WINDOW_MS = 7L * 24L * 60L * 60L * 1_000L
+    companion object {
+        @Volatile private var cachedSnapshot: Snapshot? = null
+
+        /** Warm the launcher catalogue while SystemUI is idle, not on workspace open. */
+        fun prewarm(context: Context) {
+            if (cachedSnapshot != null) return
+            Thread({
+                runCatching { TopAppRepository(context).load(emptyList(), false) }
+                    .onSuccess { cachedSnapshot = it }
+            }, "Gechuang-TopAppsPrewarm").apply { isDaemon = true }.start()
+        }
+
+        private const val MAX_VISIBLE_APPS = 36
+        private const val OBSTACLE_ICON_SIZE = 64
+        private const val USAGE_WINDOW_MS = 7L * 24L * 60L * 60L * 1_000L
     }
 }

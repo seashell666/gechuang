@@ -68,6 +68,7 @@ class TaskRepository(context: Context) {
         val token: Any?,
         val userId: Int?,
         val vendorWindowed: Boolean = false,
+        val visible: Boolean = false,
     )
 
     private val activityManager = context.getSystemService(ActivityManager::class.java)
@@ -105,7 +106,9 @@ class TaskRepository(context: Context) {
 
     fun bringTaskToFront(taskId: Int): Result<Unit> = runCatching {
         val manager = checkNotNull(activityManager) { "ActivityManager unavailable" }
-        manager.moveTaskToFront(taskId, ActivityManager.MOVE_TASK_WITH_HOME)
+        // Do not use MOVE_TASK_WITH_HOME: it brings the launcher up with the app
+        // and can leave HOME above the task, hiding the promoted cell.
+        manager.moveTaskToFront(taskId, ActivityManager.MOVE_TASK_NO_USER_ACTION)
         GechuangLog.info("task_repository", "Brought taskId=$taskId to front")
     }
 
@@ -135,6 +138,7 @@ class TaskRepository(context: Context) {
             token = windowState.token,
             userId = TaskInfoCompat.readUserId(info),
             vendorWindowed = windowState.vendorWindowed,
+            visible = TaskInfoCompat.isVisible(info) == true,
         )
     }
 

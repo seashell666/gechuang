@@ -23,7 +23,16 @@ data class WorkspaceLayoutProfile(
 
     private val leftGeometry = geometry.copy(sidebarSide = SidebarSide.LEFT)
     private val rightGeometry = geometry.copy(sidebarSide = SidebarSide.RIGHT)
-    val canvas = SlotGeometry.forRecordedDisplay(geometry.availableWidth, geometry.availableHeight, densityDpi)
+    // Side cells must use the exact same logical size and density as the main
+    // cell. A different density makes Android recreate the activity on every
+    // promotion (Douyin even restarts its SplashActivity), which is the real
+    // source of the ~0.9 s blank gap. Rendering resolution is kept full-size
+    // here; preview textures shrink it for display.
+    val canvas = SlotGeometry.forRecordedDisplay(
+        geometry.availableWidth,
+        geometry.availableHeight,
+        densityDpi,
+    )
     // Apps lay out directly at the recorded usable resolution. Fit that complete
     // buffer into a slot; do not crop navigation pixels off an already laid-out app.
     val source = Source(0, 0, canvas.width, canvas.height)
@@ -52,7 +61,7 @@ data class WorkspaceLayoutProfile(
             (height - source.height * scale) / 2f - source.top * scale)
     }
 
-    fun encode(): String = listOf("5", geometry.screenWidth, geometry.screenHeight,
+    fun encode(): String = listOf("7", geometry.screenWidth, geometry.screenHeight,
         geometry.topHeight, geometry.sidebarWidth, densityDpi, gapPixels,
         geometry.navigationInsets.left, geometry.navigationInsets.top,
         geometry.navigationInsets.right, geometry.navigationInsets.bottom,
@@ -63,6 +72,8 @@ data class WorkspaceLayoutProfile(
         geometry.displayRotation).joinToString(",")
 
     companion object {
+        private const val SLOT_RENDER_SCALE = 0.5f
+
         fun create(width: Int, height: Int, densityDpi: Int, insets: WorkspaceNavigationInsets,
             displayRotation: Int = 0) =
             WorkspaceLayoutProfile(WorkspaceGeometry.forDisplay(width, height, density = densityDpi / 160f,
@@ -72,28 +83,23 @@ data class WorkspaceLayoutProfile(
         fun decode(encoded: String?): WorkspaceLayoutProfile? = runCatching {
             val p = encoded?.split(',') ?: return@runCatching null
             val version = p.firstOrNull() ?: return@runCatching null
-            if (version !in setOf("2", "3", "4", "5") ||
-                p.size != (if (version == "5") 30 else 29)) return@runCatching null
+            if (version !in setOf("2", "3", "4", "5", "6", "7") ||
+                p.size != (if (version in setOf("5", "6", "7")) 30 else 29)) return@runCatching null
             val profile = WorkspaceLayoutProfile(WorkspaceGeometry(p[1].toInt(), p[2].toInt(),
                 p[3].toInt(), p[4].toInt(), SidebarSide.RIGHT,
                 WorkspaceNavigationInsets(p[7].toInt(), p[8].toInt(), p[9].toInt(), p[10].toInt()),
-                displayRotation = if (version == "5") p[29].toInt() else 0),
+                displayRotation = if (version in setOf("5", "6", "7")) p[29].toInt() else 0),
                 p[5].toInt(), p[6].toInt())
             val expected = profile.encode().split(',').toMutableList()
             expected[0] = p[0]
-            if (version != "5") expected.removeAt(29)
-            if (p[0] == "2") {
-                // Migrate the old full-screen canvas using its recorded insets.
-                // This requires no WindowMetrics query or fresh calibration.
-                val oldCanvas = SlotGeometry.forRecordedDisplay(profile.geometry.screenWidth,
-                    profile.geometry.screenHeight, profile.densityDpi)
-                expected[14] = oldCanvas.width.toString()
-                expected[15] = oldCanvas.height.toString()
-                expected[18] = oldCanvas.width.toString()
-                expected[19] = oldCanvas.height.toString()
+            if (version !in setOf("5", "6", "7")) expected.removeAt(29)
+            if (version != "7") {
+                // Older profiles recorded the full- or half-resolution preview canvas.
+                // It is derived, so accept it and migrate to the current canvas.
+                for (index in 14..19) expected[index] = p[index]
             }
             if (expected.joinToString(",") != encoded) return@runCatching null
-            if (version == "4" || version == "5") profile else {
+            if (version in setOf("4", "5", "6", "7")) profile else {
                 // Recalculate the old slot proportions once using the already
                 // recorded display and navigation mode; never resample metrics.
                 create(profile.geometry.screenWidth, profile.geometry.screenHeight,

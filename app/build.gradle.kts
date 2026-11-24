@@ -21,8 +21,8 @@ android {
         applicationId = "com.seashell.gechuang"
         minSdk = 33
         targetSdk = 36
-        versionCode = 304
-        versionName = "4.0.5-miui.1"
+        versionCode = 306
+        versionName = "4.0.7-miui.1"
 
     }
 

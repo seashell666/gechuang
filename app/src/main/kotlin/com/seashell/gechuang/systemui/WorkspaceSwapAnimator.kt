@@ -38,6 +38,7 @@ internal class WorkspaceSwapAnimator(private val context: Context) {
         stationaryBackground: Bitmap?,
         durationMs: Int,
         returningHome: Boolean,
+        stabilizeMain: Boolean,
         move: () -> Boolean,
         isLiveReady: () -> Boolean,
         onFinished: () -> Unit,
@@ -70,6 +71,17 @@ internal class WorkspaceSwapAnimator(private val context: Context) {
         }
         overlay = preview
         completion = onFinished
+        // Start the expensive task/display exchange immediately. The static
+        // previews are already covering the content area, so the app relaunch
+        // happens behind the animation instead of after it.
+        val moved = runCatching(move).onFailure {
+            GechuangLog.warn("workspace_swap", "Exchange callback failed", it)
+        }.getOrDefault(false)
+        if (!moved) {
+            cancel()
+            return
+        }
+        val movedAt = SystemClock.uptimeMillis()
         animator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = WorkspaceConfigContract.normalizeSwapAnimationDurationMs(durationMs).toLong()
             interpolator = PathInterpolator(0.22f, 0f, 0.12f, 1f)
@@ -87,16 +99,12 @@ internal class WorkspaceSwapAnimator(private val context: Context) {
                     preview.viewTreeObserver.registerFrameCommitCallback {
                         preview.post {
                             if (generation != token) return@post
-                            val moved = runCatching(move).onFailure {
-                                GechuangLog.warn("workspace_swap", "Exchange callback failed", it)
-                            }.getOrDefault(false)
-                            if (generation != token) return@post
-                            if (!moved) {
-                                cancel()
-                                return@post
+                            val handoffDelay = when {
+                                returningHome -> HOME_HANDOFF_DELAY_MS
+                                stabilizeMain -> MAIN_HANDOFF_DELAY_MS
+                                else -> MIN_HANDOFF_DELAY_MS
                             }
-                            val handoffDelay = if (returningHome) HOME_HANDOFF_DELAY_MS else MIN_HANDOFF_DELAY_MS
-                            awaitLiveFrame(preview, token, SystemClock.uptimeMillis(), handoffDelay, isLiveReady)
+                            awaitLiveFrame(preview, token, movedAt, handoffDelay, isLiveReady)
                         }
                     }
                     preview.invalidate()
@@ -145,9 +153,13 @@ internal class WorkspaceSwapAnimator(private val context: Context) {
 
     private companion object {
         const val MIN_HANDOFF_DELAY_MS = 80L
+        // Moving a task into Display 0 makes several apps recreate their first
+        // frame. Reveal at once and the user sees the app's black launch surface.
+        // Keep the captured frame a little longer for that one transition.
+        const val MAIN_HANDOFF_DELAY_MS = 350L
         // HOME's wallpaper zoom can continue after the task has resumed.
         const val HOME_HANDOFF_DELAY_MS = WorkspaceTransitionSpec.DURATION_MS + MIN_HANDOFF_DELAY_MS
-        const val MAX_HANDOFF_DELAY_MS = 600L
+        const val MAX_HANDOFF_DELAY_MS = 900L
     }
 }
 

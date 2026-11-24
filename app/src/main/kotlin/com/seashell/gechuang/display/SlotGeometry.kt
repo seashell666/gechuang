@@ -17,6 +17,16 @@ data class SlotGeometry(
         require(densityDpi > 0) { "Slot density must be positive" }
     }
 
+    /** Same dp layout at a lower physical resolution for the side previews. */
+    fun scaledBy(factor: Float): SlotGeometry {
+        require(factor > 0f) { "Scale must be positive" }
+        return SlotGeometry(
+            (width * factor).toInt().coerceAtLeast(1),
+            (height * factor).toInt().coerceAtLeast(1),
+            (densityDpi * factor).toInt().coerceAtLeast(1),
+        )
+    }
+
     companion object {
         /**
          * Keeps the default display's portrait width and density, independent of main rotation.

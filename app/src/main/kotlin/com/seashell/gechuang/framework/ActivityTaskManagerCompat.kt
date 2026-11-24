@@ -39,6 +39,17 @@ object ActivityTaskManagerCompat {
         secondArgument = displayId,
     )
 
+    /** Focus a task without moving it. On a virtual display this also makes that
+     * display the input/IME target, which is what lets the side surface keep its
+     * activity alive while still receiving touches. */
+    fun setFocusedTask(taskId: Int): Result<Unit> = runCatching {
+        val target = checkNotNull(service) { "ActivityTaskManager service unavailable" }
+        val method = findSingleIntMethod(target.javaClass, listOf("setFocusedTask"))
+            ?: error("No compatible setFocusedTask candidate")
+        method.invoke(target, taskId)
+        GechuangLog.info("activity_task_manager", "Focused taskId=$taskId")
+    }
+
     fun removeTask(taskId: Int): Result<Unit> = runCatching {
         val target = checkNotNull(service) { "ActivityTaskManager service unavailable" }
         val method = findSingleIntMethod(target.javaClass, listOf("removeTask"))

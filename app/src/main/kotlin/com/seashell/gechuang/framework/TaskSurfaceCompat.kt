@@ -3,6 +3,7 @@ package com.seashell.gechuang.framework
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Rect
@@ -60,6 +61,10 @@ object TaskSurfaceCompat {
 
     @Volatile
     private var hostClassLoader: ClassLoader? = null
+    @Volatile
+    private var cachedOrganizer: Any? = null
+    @Volatile
+    private var cachedOrganizerLoader: ClassLoader? = null
     @Volatile
     private var activityManager: ActivityManager? = null
     private val activePresentations = ConcurrentHashMap<Int, ActivePresentation>()
@@ -238,6 +243,100 @@ object TaskSurfaceCompat {
     fun capturePreview(taskId: Int, sourceCrop: Rect? = null, allowHomeRoot: Boolean = false): android.graphics.Bitmap? = runCatching {
         WorkspaceEnergyDiagnostics.previewCaptures.incrementAndGet()
         val leash = findTaskLeash(taskId, allowHomeRoot = allowHomeRoot) ?: return@runCatching null
+        // Android 14 renamed the internal capture classes. MIUI 14 / Android 13
+        // still exposes the ordinary SurfaceControl layer capture API, and using
+        // it is the difference between a covered swap and a bare task move.
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            captureA14(leash, sourceCrop) ?: return@runCatching null
+        } else {
+            captureA13(leash, sourceCrop) ?: return@runCatching null
+        }
+    }.onFailure { GechuangLog.warn("task_preview", "Task preview unavailable taskId=$taskId", it) }.getOrNull()
+
+    /**
+     * Attach a compositor mirror of a display-0 task to a SurfaceView. This is
+     * deliberately a layer reference: no screenshot, no Bitmap, no encode/
+     * decode, and no task move. MIUI may block the hidden API; callers must
+     * keep a capture fallback.
+     */
+    @SuppressLint("BlockedPrivateApi")
+    fun mirrorTaskIntoSurface(
+        taskId: Int,
+        surfaceView: android.view.SurfaceView,
+        destinationWidth: Int,
+        destinationHeight: Int,
+        sourceBounds: Rect? = null,
+        sourceScale: Float = 1f,
+        sourceTranslationX: Float = 0f,
+        sourceTranslationY: Float = 0f,
+    ): Result<Any> = runCatching {
+        require(destinationWidth > 0 && destinationHeight > 0)
+        val parent = surfaceControlOf(surfaceView)
+            ?: error("SurfaceView surface control is unavailable")
+        val source = findTaskLeash(taskId, requireMainDisplay = true)
+            ?: observedLeashes[taskId]?.takeIf(::isValid)
+            ?: error("Main task leash is unavailable taskId=$taskId")
+        val bounds = sourceBounds?.takeIf { it.width() > 0 && it.height() > 0 }
+            ?: taskBoundsForMirror(taskId)
+            ?: Rect(0, 0, destinationWidth, destinationHeight)
+        val scType = Class.forName("android.view.SurfaceControl")
+        val mirror = scType.getDeclaredMethod("mirrorSurface", scType).run {
+            isAccessible = true
+            invoke(null, source)
+        } ?: error("SurfaceControl.mirrorSurface returned null")
+        val txType = Class.forName("android.view.SurfaceControl\$Transaction")
+        val transaction = txType.getDeclaredConstructor().newInstance()
+        fun call(name: String, vararg args: Any?) {
+            val method = txType.methods.firstOrNull { candidate ->
+                candidate.name == name && candidate.parameterCount == args.size + 1 &&
+                    candidate.parameterTypes.firstOrNull() == scType
+            } ?: error("SurfaceControl.Transaction.$name is unavailable")
+            method.invoke(transaction, mirror, *args)
+        }
+        try {
+            call("reparent", parent)
+            call("setLayer", Int.MAX_VALUE)
+            val desiredScaleX = destinationWidth.toFloat() / bounds.width().coerceAtLeast(1)
+            val desiredScaleY = destinationHeight.toFloat() / bounds.height().coerceAtLeast(1)
+            // TaskSurfaceCompat already fits the main task into the content
+            // rectangle. A compositor mirror inherits that transform, so
+            // divide it out before applying the rail-preview transform.
+            val fitScaleX = desiredScaleX / sourceScale.coerceAtLeast(0.01f)
+            val fitScaleY = desiredScaleY / sourceScale.coerceAtLeast(0.01f)
+            call("setPosition", -sourceTranslationX * desiredScaleX, -sourceTranslationY * desiredScaleY)
+            call("setMatrix", fitScaleX, 0f, 0f, fitScaleY)
+            call("setCrop", Rect(0, 0, bounds.width(), bounds.height()))
+            txType.getMethod("apply").invoke(transaction)
+        } catch (error: Throwable) {
+            runCatching { txType.getMethod("close").invoke(transaction) }
+            releaseTaskMirror(mirror)
+            throw error
+        } finally {
+            runCatching { txType.getMethod("close").invoke(transaction) }
+        }
+        mirror
+    }
+
+    fun taskBoundsForMirror(taskId: Int): Rect? =
+        observedStates[taskId]?.bounds?.takeIf { it.width() > 0 && it.height() > 0 }
+            ?: findLiveTaskState(taskId)?.bounds?.takeIf { it.width() > 0 && it.height() > 0 }
+
+    fun releaseTaskMirror(mirror: Any?) {
+        if (mirror == null) return
+        runCatching {
+            val release = mirror.javaClass.getMethod("release")
+            release.invoke(mirror)
+        }.onFailure { GechuangLog.warn("task_mirror", "Unable to release mirror layer", it) }
+    }
+
+    private fun surfaceControlOf(surfaceView: android.view.SurfaceView): Any? = runCatching {
+        val method = android.view.SurfaceView::class.java
+            .getDeclaredMethod("getSurfaceControl")
+            .apply { isAccessible = true }
+        method.invoke(surfaceView)
+    }.getOrNull()
+
+    private fun captureA14(leash: Any, sourceCrop: Rect?): android.graphics.Bitmap? = runCatching {
         val surfaceType = Class.forName("android.view.SurfaceControl")
         val captureType = Class.forName("android.window.ScreenCaptureInternal")
         val builderType = Class.forName("android.window.ScreenCaptureInternal\$LayerCaptureArgs\$Builder")
@@ -251,21 +350,44 @@ object TaskSurfaceCompat {
         val buffer = captureType.methods.firstOrNull {
             it.name == "captureLayers" && it.parameterCount == 1 && it.parameterTypes[0].isInstance(args)
         }?.invoke(null, args) ?: return@runCatching null
-        val hardwareBuffer = invokeRequired(buffer, "getHardwareBuffer") as? android.hardware.HardwareBuffer
-        try {
-            val bitmap = invokeRequired(buffer, "asBitmap") as? android.graphics.Bitmap
-                ?: return@runCatching null
-            try { bitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false) }
-            finally { bitmap.recycle() }
-        } finally {
-            hardwareBuffer?.close()
+        bufferToBitmap(buffer)
+    }.getOrNull()
+
+    private fun captureA13(leash: Any, sourceCrop: Rect?): android.graphics.Bitmap? = runCatching {
+        val loader = hostClassLoader ?: return@runCatching null
+        val surfaceType = Class.forName("android.view.SurfaceControl", false, loader)
+        val capture = allMethods(surfaceType).firstOrNull {
+            it.name == "captureLayers" && it.parameterCount == 3 &&
+                it.parameterTypes[0] == surfaceType &&
+                it.parameterTypes[1] == Rect::class.java &&
+                it.parameterTypes[2] == Float::class.javaPrimitiveType
+        } ?: return@runCatching null
+        capture.isAccessible = true
+        val buffer = capture.invoke(null, leash, sourceCrop, 1f)
+            ?: return@runCatching null
+        val bitmap = bufferToBitmap(buffer) ?: return@runCatching null
+        // MIUI 13's layer-capture overload returns the task's full display frame
+        // even when a source crop is supplied. Trim it so the preview contains
+        // only the workspace viewport, not the top bar and side slots.
+        cropToSource(bitmap, sourceCrop).also {
+            GechuangLog.info("task_preview", "Android 13 task capture ${it.width}x${it.height}")
         }
-    }.onFailure { GechuangLog.warn("task_preview", "Task preview unavailable taskId=$taskId", it) }.getOrNull()
+    }.onFailure {
+        GechuangLog.warn("task_preview", "Android 13 task capture unavailable", it)
+    }.getOrNull()
 
     /** Capture the composed viewport so HOME keeps its rendered wallpaper zoom and offsets. */
     internal fun captureDisplayPreview(sourceCrop: Rect): android.graphics.Bitmap? = runCatching {
         WorkspaceEnergyDiagnostics.previewCaptures.incrementAndGet()
         if (sourceCrop.isEmpty) return@runCatching null
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            captureDisplayA14(sourceCrop) ?: return@runCatching null
+        } else {
+            captureDisplayA13(sourceCrop) ?: return@runCatching null
+        }
+    }.onFailure { GechuangLog.warn("task_preview", "Display preview unavailable", it) }.getOrNull()
+
+    private fun captureDisplayA14(sourceCrop: Rect): android.graphics.Bitmap? = runCatching {
         val captureType = Class.forName("android.window.ScreenCaptureInternal")
         val builderType = Class.forName("android.window.ScreenCaptureInternal\$CaptureArgs\$Builder")
         val builder = builderType.getConstructor().newInstance()
@@ -286,16 +408,86 @@ object TaskSurfaceCompat {
         } ?: return@runCatching null
         capture.invoke(service, Display.DEFAULT_DISPLAY, args, listener)
         val buffer = invokeRequired(listener, "getBuffer") ?: return@runCatching null
-        val hardwareBuffer = invokeRequired(buffer, "getHardwareBuffer") as? android.hardware.HardwareBuffer
-        try {
-            val bitmap = invokeRequired(buffer, "asBitmap") as? android.graphics.Bitmap
-                ?: return@runCatching null
-            try { bitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false) }
-            finally { bitmap.recycle() }
+        bufferToBitmap(buffer)
+    }.getOrNull()
+
+    private fun captureDisplayA13(sourceCrop: Rect): android.graphics.Bitmap? = runCatching {
+        val loader = hostClassLoader ?: return@runCatching null
+        val surfaceType = Class.forName("android.view.SurfaceControl", false, loader)
+        val token = allMethods(surfaceType).firstOrNull {
+            it.name == "getInternalDisplayToken" && it.parameterCount == 0
+        }?.apply { isAccessible = true }?.invoke(null)
+            ?: return@runCatching null
+        val builderType = Class.forName(
+            "android.view.SurfaceControl\$DisplayCaptureArgs\$Builder", false, loader,
+        )
+        val builder = builderType.getConstructor(android.os.IBinder::class.java).newInstance(token)
+        allMethods(builderType).firstOrNull {
+            it.name == "setSourceCrop" && it.parameterCount == 1 &&
+                it.parameterTypes[0] == Rect::class.java
+        }?.apply { isAccessible = true }?.invoke(builder, sourceCrop)
+            ?: return@runCatching null
+        allMethods(builderType).firstOrNull {
+            it.name == "setFrameScale" && it.parameterCount == 1 &&
+                it.parameterTypes[0] == Float::class.javaPrimitiveType
+        }?.apply { isAccessible = true }?.invoke(builder, 1f)
+            ?: return@runCatching null
+        val args = allMethods(builderType).firstOrNull {
+            it.name == "build" && it.parameterCount == 0
+        }?.apply { isAccessible = true }?.invoke(builder)
+            ?: return@runCatching null
+        val capture = allMethods(surfaceType).firstOrNull {
+            it.name == "captureDisplay" && it.parameterCount == 1 &&
+                it.parameterTypes[0].isInstance(args)
+        } ?: return@runCatching null
+        capture.isAccessible = true
+        val buffer = capture.invoke(null, args) ?: return@runCatching null
+        val bitmap = bufferToBitmap(buffer) ?: return@runCatching null
+        cropToSource(bitmap, sourceCrop).also {
+            GechuangLog.info("task_preview", "Android 13 display capture ${it.width}x${it.height}")
+        }
+    }.onFailure {
+        GechuangLog.warn("task_preview", "Android 13 display capture unavailable", it)
+    }.getOrNull()
+
+    private fun cropToSource(
+        bitmap: android.graphics.Bitmap,
+        source: Rect?,
+    ): android.graphics.Bitmap {
+        GechuangLog.info(
+            "task_preview",
+            "crop source=$source bitmap=${bitmap.width}x${bitmap.height}",
+        )
+        if (source == null || source.isEmpty) return bitmap
+        if (bitmap.width == source.width() && bitmap.height == source.height()) return bitmap
+        val crop = Rect(source)
+        crop.intersect(0, 0, bitmap.width, bitmap.height)
+        if (crop.isEmpty || (crop.width() == bitmap.width && crop.height() == bitmap.height)) {
+            return bitmap
+        }
+        return runCatching {
+            android.graphics.Bitmap.createBitmap(
+                bitmap, crop.left, crop.top, crop.width(), crop.height(),
+            ).also { bitmap.recycle() }
+        }.getOrElse { bitmap }
+    }
+
+    private fun bufferToBitmap(buffer: Any): android.graphics.Bitmap? {
+        val hardwareBuffer = runCatching {
+            invokeRequired(buffer, "getHardwareBuffer") as? android.hardware.HardwareBuffer
+        }.getOrNull()
+        return try {
+            val source = invokeRequired(buffer, "asBitmap") as? android.graphics.Bitmap
+                ?: return null
+            try {
+                source.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+            } finally {
+                source.recycle()
+            }
         } finally {
             hardwareBuffer?.close()
         }
-    }.onFailure { GechuangLog.warn("task_preview", "Display preview unavailable", it) }.getOrNull()
+    }
 
     fun present(
         taskId: Int,
@@ -750,23 +942,7 @@ object TaskSurfaceCompat {
 
     private fun findTaskLeash(taskId: Int, requireMainDisplay: Boolean = true, allowHomeRoot: Boolean = false): Any? = runCatching {
         val loader = hostClassLoader ?: error("SystemUI host class loader is unavailable")
-        val wmComponent = runCatching {
-            val factoryClass = loader.loadClass(SYSTEM_UI_FACTORY)
-            val initializer = findField(factoryClass, INITIALIZER_FIELD).get(null)
-                ?: error("SystemUI initializer is null")
-            invokeRequired(initializer, "getWMComponent")
-                ?: error("SystemUI WM component is null")
-        }.getOrElse { error ->
-            GechuangLog.info(
-                "task_surface",
-                "A14 initializer unavailable, falling back to Android 13 factory: ${error.message}",
-            )
-            resolveWmComponentA13(loader)
-                ?: error("SystemUI WM component is null")
-        }
-        val organizer = resolveTaskOrganizer(wmComponent)
-            ?: resolveOrganizerA13(wmComponent)
-            ?: error("ShellTaskOrganizer provider is unavailable")
+        val organizer = organizerFor(loader) ?: error("ShellTaskOrganizer provider is unavailable")
         val tasks = findField(organizer.javaClass, TASKS_FIELD).get(organizer)
             ?: error("ShellTaskOrganizer task map is null")
         val lock = allFields(organizer.javaClass)
@@ -801,6 +977,36 @@ object TaskSurfaceCompat {
     }.onFailure { error ->
         GechuangLog.warn("task_surface", "Task leash lookup failed taskId=$taskId", error)
     }.getOrNull()
+
+    /** Shell's organizer is process-stable. Resolving it on every reapply used to
+     * repeat class loading, factory reflection and a stack trace every second,
+     * which is measurable main-thread work while a task is scrolling. */
+    @Synchronized
+    private fun organizerFor(loader: ClassLoader): Any? {
+        cachedOrganizer?.takeIf {
+            cachedOrganizerLoader === loader && hasField(it.javaClass, TASKS_FIELD)
+        }?.let { return it }
+        val wmComponent = runCatching {
+            val factoryClass = loader.loadClass(SYSTEM_UI_FACTORY)
+            val initializer = findField(factoryClass, INITIALIZER_FIELD).get(null)
+                ?: error("SystemUI initializer is null")
+            invokeRequired(initializer, "getWMComponent")
+                ?: error("SystemUI WM component is null")
+        }.getOrElse { error ->
+            GechuangLog.info(
+                "task_surface",
+                "A14 initializer unavailable, falling back to Android 13 factory: ${error.message}",
+            )
+            resolveWmComponentA13(loader)
+                ?: error("SystemUI WM component is null")
+        }
+        val organizer = resolveTaskOrganizer(wmComponent)
+            ?: resolveOrganizerA13(wmComponent)
+            ?: return null
+        cachedOrganizer = organizer
+        cachedOrganizerLoader = loader
+        return organizer
+    }
 
     private fun findHomeRoot(tasks: Any, taskId: Int): Any? {
         // ColorOS reports the launcher child through ActivityManager but only

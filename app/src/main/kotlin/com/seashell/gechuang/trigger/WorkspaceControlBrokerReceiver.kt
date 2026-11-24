@@ -3,15 +3,25 @@ package com.seashell.gechuang.trigger
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import com.seashell.gechuang.logging.GechuangLog
+import java.util.concurrent.atomic.AtomicBoolean
 
 class WorkspaceControlBrokerReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val pendingResult = goAsync()
+        val finished = AtomicBoolean(false)
+        val finishOnce: () -> Unit = {
+            if (finished.compareAndSet(false, true)) {
+                pendingResult.finish()
+            }
+        }
         val callback: (TriggerCoordinator.RequestResult) -> Unit = { result ->
             GechuangLog.info("trigger_broker", "SystemUI request completed result=$result")
-            pendingResult.finish()
+            finishOnce()
         }
+        Handler(Looper.getMainLooper()).postDelayed(Runnable { finishOnce() }, 2500L)
         when (intent.action) {
             TriggerBroadcastContract.ACTION_HOST_TOGGLE_REQUEST ->
                 TriggerCoordinator.requestToggle(
@@ -30,7 +40,7 @@ class WorkspaceControlBrokerReceiver : BroadcastReceiver() {
                     onlyIfInactive = intent.getBooleanExtra(TriggerBroadcastContract.EXTRA_ONLY_IF_INACTIVE, false),
                     onResult = callback,
                 )
-            else -> pendingResult.finish()
+            else -> finishOnce()
         }
     }
 }

@@ -2,7 +2,7 @@ package com.seashell.gechuang.display
 
 import android.content.ComponentName
 
-const val WORKSPACE_SLOT_COUNT = 3
+const val WORKSPACE_SLOT_COUNT = 6
 
 sealed interface SlotState {
     data object Empty : SlotState

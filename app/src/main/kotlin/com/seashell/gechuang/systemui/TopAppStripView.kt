@@ -7,12 +7,13 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
-import android.text.format.DateFormat
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewOutlineProvider
 import android.view.ViewConfiguration
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -21,62 +22,37 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.seashell.gechuang.R
 import com.seashell.gechuang.config.AppLanguage
-import com.seashell.gechuang.config.TopContentMode
 import com.seashell.gechuang.config.WorkspaceConfigClient
-import com.seashell.gechuang.config.WorkspaceTopConfig
 import com.seashell.gechuang.logging.GechuangLog
-import com.seashell.gechuang.workspace.SidebarButtonLayout
 import com.seashell.gechuang.workspace.SidebarSide
 import com.seashell.gechuang.workspace.WorkspaceControlMetrics
-import java.util.Date
 
+/**
+ * Compact top app strip.
+ *
+ * Only the app strip is visible. The side toggle, settings and exit buttons float
+ * over the right edge of the strip, so the app icons can scroll underneath them.
+ */
 class TopAppStripView(
     context: Context,
     initialSidebarSide: SidebarSide,
     private val onAppClicked: (Intent) -> Unit,
     private val onSidebarSideRequested: (SidebarSide) -> Unit,
     private val onSettingsRequested: () -> Unit,
+    private val onTasksRequested: () -> Unit,
+    private val onAddAppRequested: () -> Unit,
     private val onExitRequested: () -> Unit,
     private val onFrostStrengthChanged: (Int) -> Unit,
     private val onAppDragStarting: (View, Intent) -> Boolean,
-    private val onAppDragTouch: (View, android.view.MotionEvent) -> Boolean,
-    monitorSlots: () -> android.os.Bundle,
+    private val onAppDragTouch: (View, MotionEvent) -> Boolean,
+    @Suppress("UNUSED_PARAMETER") monitorSlots: () -> android.os.Bundle,
 ) : FrameLayout(context) {
     private val repository = TopAppRepository(context)
-    private val titleView = LoopingTitleView(context).apply {
-        visibility = View.GONE
-        textSize = 16f
-        setTextColor(Color.WHITE)
-        gravity = Gravity.CENTER
-        maxLines = 1
-        setSingleLine(true)
-        ellipsize = android.text.TextUtils.TruncateAt.END
-    }
-    private val titleIcon = ImageView(context).apply {
-        contentDescription = "Gechuang"
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(Color.TRANSPARENT)
-        }
-        outlineProvider = ViewOutlineProvider.BACKGROUND
-        clipToOutline = true
-        runCatching {
-            val packageName = "com.seashell.gechuang"
-            val moduleResources = context.packageManager.getResourcesForApplication(packageName)
-            val iconId = moduleResources.getIdentifier("ic_launcher_artwork", "drawable", packageName)
-            // The circular artwork is already cropped to its visible bounds.
-            setImageDrawable(moduleResources.getDrawable(iconId, null))
-        }.onFailure { error ->
-            GechuangLog.warn("top_apps", "Unable to load default title icon", error)
-            setImageDrawable(context.packageManager.getDefaultActivityIcon())
-        }
-    }
-    private val header = WorkspaceHeaderPager(context, monitorSlots, titleIcon.drawable)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val appRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-        setPadding(dp(4), 0, dp(4), 0)
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(8), 0, dp(4), 0)
     }
     private val appScroll = object : HorizontalScrollView(context) {
         private var downX = 0f
@@ -97,8 +73,6 @@ class TopAppStripView(
                 val direction = if (event.x < previousX) 1 else -1
                 if (kotlin.math.abs(dx) > touchSlop && kotlin.math.abs(dx) > kotlin.math.abs(dy) &&
                     !canScrollHorizontally(direction)) {
-                    // HorizontalScrollView owns its scroll until it reaches an edge.
-                    // Voluntarily release interception for the pager's next move.
                     parent?.requestDisallowInterceptTouchEvent(false)
                 }
                 previousX = event.x
@@ -108,17 +82,18 @@ class TopAppStripView(
     }.apply {
         isHorizontalScrollBarEnabled = false
         isFillViewport = true
+        clipToPadding = true
+        setPadding(0, 0, 0, 0)
         addView(appRow, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
     }
-    private val leftButton = SideSelectionButton(context, SidebarSide.LEFT).apply {
-        contentDescription = AppLanguage.string(context, R.string.window_side_left)
-        setOnClickListener { onSidebarSideRequested(SidebarSide.LEFT) }
-    }
-    private val rightButton = SideSelectionButton(context, SidebarSide.RIGHT).apply {
-        contentDescription = AppLanguage.string(context, R.string.window_side_right)
-        setOnClickListener { onSidebarSideRequested(SidebarSide.RIGHT) }
-    }
     private var sidebarSide = initialSidebarSide
+    private val sideToggleButton = SideToggleButton(context).apply {
+        side = sidebarSide
+        contentDescription = sideDescription(sidebarSide)
+        setOnClickListener {
+            onSidebarSideRequested(if (sidebarSide == SidebarSide.LEFT) SidebarSide.RIGHT else SidebarSide.LEFT)
+        }
+    }
     private val exitButton = ExitButton(context).apply {
         contentDescription = AppLanguage.string(context, R.string.window_exit)
         setOnClickListener { onExitRequested() }
@@ -127,17 +102,24 @@ class TopAppStripView(
         contentDescription = AppLanguage.string(context, R.string.open_settings)
         setOnClickListener { onSettingsRequested() }
     }
-    private var videoEmbedded = false
-    private var videoCaptureAvailable = false
-    private var videoActionListener: (() -> Unit)? = null
-    private var controlsChangedListener: (() -> Unit)? = null
-    private val videoActionButton = VideoActionButton(context).apply {
-        contentDescription = AppLanguage.string(context, R.string.control_video_capture)
-        visibility = GONE
-        isFocusable = true
-        setOnClickListener {
-            if ((videoCaptureAvailable || videoEmbedded) && !internalAppDragActive) videoActionListener?.invoke()
+    private val tasksButton = TasksButton(context).apply {
+        contentDescription = "最近任务"
+        setOnClickListener { onTasksRequested() }
+    }
+    private val controls = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        setPadding(dp(3), 0, dp(3), 0)
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(24).toFloat()
+            setColor(Color.argb(255, 8, 14, 18))
         }
+        addView(sideToggleButton, LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)))
+        addView(tasksButton, LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)))
+        addView(settingsButton, LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)))
+        addView(exitButton.apply { scaleX = if (sidebarSide == SidebarSide.LEFT) -1f else 1f },
+            LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)))
     }
     private var loading = false
     private var refreshPending = false
@@ -147,6 +129,8 @@ class TopAppStripView(
     private val refreshRetry = Runnable { refresh(force = true) }
     private var internalAppDragActive = false
     private var deferredApps: List<TopAppRepository.AppEntry>? = null
+    private var controlsChangedListener: (() -> Unit)? = null
+    private var videoActionListener: (() -> Unit)? = null
     private val dismissHint = TextView(context).apply {
         text = AppLanguage.string(context, R.string.window_drop_background)
         textSize = 18f
@@ -159,36 +143,26 @@ class TopAppStripView(
 
     init {
         setBackgroundColor(Color.TRANSPARENT)
-        addView(
-            LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(8), 0, dp(8), dp(WorkspaceControlMetrics.APP_ICON_BOTTOM_INSET_DP))
-                addView(
-                    header,
-                    LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f),
-                )
-                addView(
-                    actionRow(),
-                    LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(WorkspaceControlMetrics.ACTION_HEIGHT_DP)),
-                )
-                addView(
-                    appScroll,
-                    LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(APP_TILE_HEIGHT_DP)),
-                )
-            },
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
-                topMargin = dp(WorkspaceControlMetrics.STATUS_HEIGHT_DP)
-            },
-        )
+        val rowTop = dp(WorkspaceControlMetrics.STATUS_HEIGHT_DP)
+        val rowParams = LayoutParams(
+            dp(APP_TILE_WIDTH_DP * PINNED_APP_SLOTS + 8),
+            dp(APP_TILE_HEIGHT_DP),
+            Gravity.TOP,
+        ).apply {
+            topMargin = rowTop
+        }
+        addView(appScroll, rowParams)
+        addView(controls, LayoutParams(LayoutParams.WRAP_CONTENT, dp(APP_TILE_HEIGHT_DP), Gravity.TOP or Gravity.END).apply {
+            topMargin = rowTop
+            rightMargin = dp(4)
+        })
         addView(dismissHint, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
             topMargin = dp(WorkspaceControlMetrics.STATUS_HEIGHT_DP)
         })
-        updateSideButtons()
     }
 
     private val configChangedReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            // Read configuration through the explicit module receiver; do not trust broadcast extras.
             if (intent.action == com.seashell.gechuang.config.WorkspaceConfigContract.ACTION_CHANGED ||
                 intent.action == android.content.Intent.ACTION_LOCALE_CHANGED) {
                 refreshRetryCount = 0
@@ -196,102 +170,41 @@ class TopAppStripView(
             }
         }
     }
-    private var topConfig = WorkspaceTopConfig()
     private var workspaceVisible = false
-    private val titleTick = object : Runnable {
-        override fun run() {
-            renderTitle()
-            if (isAttachedToWindow && workspaceVisible &&
-                topConfig.contentMode in listOf(TopContentMode.TIME, TopContentMode.DATE)) {
-                postDelayed(this, 1000L - System.currentTimeMillis() % 1000L)
-            }
-        }
-    }
-
-    private fun updateTitle() {
-        leftButton.contentDescription = AppLanguage.string(context, R.string.window_side_left)
-        rightButton.contentDescription = AppLanguage.string(context, R.string.window_side_right)
-        exitButton.contentDescription = AppLanguage.string(context, R.string.window_exit)
-        settingsButton.contentDescription = AppLanguage.string(context, R.string.open_settings)
-        updateVideoActionDescription()
-        dismissHint.text = AppLanguage.string(context, R.string.window_drop_background)
-        removeCallbacks(titleTick)
-        titleTick.run()
-        controlsChangedListener?.invoke()
-    }
-
-    private fun renderTitle() {
-        val mode = topConfig.contentMode
-        val custom = mode == TopContentMode.TEXT
-        val scroll = custom && topConfig.textScroll
-        titleView.ellipsize = android.text.TextUtils.TruncateAt.END
-        titleView.setScrolling(scroll, workspaceVisible)
-        titleView.gravity = Gravity.CENTER
-        titleView.textSize = if (custom) topConfig.textSizeSp.toFloat() else 16f
-        titleView.typeface = if (custom) com.seashell.gechuang.config.TopTextStyle.typeface(
-            topConfig.textFontFamily, topConfig.textBold,
-        ) else android.graphics.Typeface.DEFAULT
-        titleIcon.visibility = if (mode == TopContentMode.ICON) View.VISIBLE else View.GONE
-        titleView.visibility = if (mode == TopContentMode.ICON || mode == TopContentMode.EMPTY) View.GONE else View.VISIBLE
-        val displayTitle = when (mode) {
-            TopContentMode.TIME -> {
-                val skeleton = if (DateFormat.is24HourFormat(context)) {
-                    if (topConfig.showSeconds) "Hms" else "Hm"
-                } else if (topConfig.showSeconds) "hms" else "hm"
-                java.text.SimpleDateFormat(
-                    DateFormat.getBestDateTimePattern(AppLanguage.locale(context), skeleton), AppLanguage.locale(context),
-                ).format(Date())
-            }
-            TopContentMode.DATE -> {
-                val locale = AppLanguage.locale(context)
-                java.text.SimpleDateFormat(DateFormat.getBestDateTimePattern(locale, "MMMEd"), locale).format(Date())
-            }
-            else -> topConfig.title
-        }
-        // App-strip refreshes must not restart a long marquee before its tail
-        // becomes visible. Only changing the content should reset its position.
-        if (!android.text.TextUtils.equals(titleView.text, displayTitle)) titleView.text = displayTitle
-    }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        GechuangLog.info("top_apps", "Attached appStrip children=${appRow.childCount}")
         context.registerReceiver(configChangedReceiver,
             android.content.IntentFilter(com.seashell.gechuang.config.WorkspaceConfigContract.ACTION_CHANGED).apply {
                 addAction(android.content.Intent.ACTION_LOCALE_CHANGED)
             },
             Context.RECEIVER_EXPORTED)
-        updateTitle()
-        if (workspaceVisible && appRow.childCount == 0) refresh(force = true)
+        if (appRow.childCount == 0) refresh(force = true)
+        controlsChangedListener?.invoke()
     }
 
     override fun onDetachedFromWindow() {
-        removeCallbacks(titleTick)
         removeCallbacks(refreshRetry)
         context.unregisterReceiver(configChangedReceiver)
         super.onDetachedFromWindow()
     }
 
     fun setWorkspaceVisible(visible: Boolean) {
+        GechuangLog.info("top_apps", "Workspace visible=$visible children=${appRow.childCount}")
         if (visible && !workspaceVisible) refreshRetryCount = 0
         workspaceVisible = visible
         if (!visible) removeCallbacks(refreshRetry)
         else if (appRow.childCount == 0) refresh(force = true)
-        updateTitle()
-        header.setWorkspaceVisible(visible)
+        controlsChangedListener?.invoke()
     }
 
-    internal fun setMonitorControlsSelected(selected: Boolean) = header.setControlsSelected(selected)
+    internal fun setMonitorControlsSelected(@Suppress("UNUSED_PARAMETER") selected: Boolean) = Unit
 
-    internal fun setMonitorWallpaperLight(light: Boolean) = header.setWallpaperLight(light)
+    internal fun setMonitorWallpaperLight(@Suppress("UNUSED_PARAMETER") light: Boolean) = Unit
 
-    fun setVideoActionState(canCapture: Boolean, embedded: Boolean) {
-        videoCaptureAvailable = canCapture
-        videoEmbedded = embedded
-        videoActionButton.isVideoEmbedded = embedded
-        videoActionButton.visibility = if (canCapture || embedded) VISIBLE else GONE
-        videoActionButton.isEnabled = canCapture || embedded
-        updateVideoActionDescription()
-    }
+    fun setVideoActionState(@Suppress("UNUSED_PARAMETER") canCapture: Boolean,
+        @Suppress("UNUSED_PARAMETER") embedded: Boolean) = Unit
 
     fun setOnVideoActionRequested(listener: () -> Unit) {
         videoActionListener = listener
@@ -301,14 +214,10 @@ class TopAppStripView(
         controlsChangedListener = listener
     }
 
-    private fun updateVideoActionDescription() {
-        videoActionButton.contentDescription = AppLanguage.string(context,
-            if (videoEmbedded) R.string.control_video_release else R.string.control_video_capture)
-    }
-
     fun setSidebarSide(side: SidebarSide) {
         sidebarSide = side
-        updateSideButtons()
+        sideToggleButton.side = side
+        sideToggleButton.contentDescription = sideDescription(side)
         exitButton.scaleX = if (side == SidebarSide.LEFT) -1f else 1f
     }
 
@@ -331,8 +240,18 @@ class TopAppStripView(
         return bounds.contains(x.toInt(), y.toInt()) && appScroll.canScrollHorizontally(direction)
     }
 
+    /** True when the finger is on the app strip itself. Page paging must never
+     * steal that gesture; the strip scrolls, and at its end it simply stops. */
+    fun containsAppStrip(x: Float, y: Float): Boolean {
+        val bounds = Rect(appScroll.scrollX, appScroll.scrollY,
+            appScroll.scrollX + appScroll.width, appScroll.scrollY + appScroll.height)
+        offsetDescendantRectToMyCoords(appScroll, bounds)
+        return bounds.contains(x.toInt(), y.toInt())
+    }
+
     fun refresh(force: Boolean = false) {
         removeCallbacks(refreshRetry)
+        GechuangLog.info("top_apps", "Refresh requested force=$force loading=$loading")
         val now = System.currentTimeMillis()
         if (loading) {
             refreshPending = refreshPending || force
@@ -342,39 +261,26 @@ class TopAppStripView(
         loading = true
         val generation = ++refreshGeneration
         Thread({
-            val config = WorkspaceConfigClient.queryOrNull(context)
-            if (config != null) AppLanguage.updateHostLanguage(config.languageTag)
-            val result = config?.let {
-                runCatching {
-                    repository.load(
-                        if (config.manualAppOrder) config.appComponents else emptyList(),
-                        manualOrder = config.manualAppOrder,
-                    )
-                }
+            // Render from the last verified snapshot first. The provider call can
+            // be blocked by OEM background policy; it must not leave the strip empty.
+            val cached = WorkspaceConfigClient.cachedOrNull(context)
+            if (cached != null) AppLanguage.updateHostLanguage(cached.languageTag)
+            val initial = runCatching {
+                repository.load(
+                    if (cached?.manualAppOrder == true) cached.appComponents else emptyList(),
+                    manualOrder = cached?.manualAppOrder == true,
+                )
             }
-            post {
+            mainHandler.post {
                 if (generation != refreshGeneration) return@post
                 loading = false
-                if (config != null) {
-                    onFrostStrengthChanged(config.frostStrength)
-                    topConfig = config
-                    updateTitle()
-                    header.setItems(config.monitorItems)
-                    result?.onSuccess { snapshot ->
-                        refreshRetryCount = 0
-                        lastRefreshAt = System.currentTimeMillis()
-                        header.setObstacleIcons(snapshot.obstacleIcons)
-                        renderApps(snapshot.visibleApps)
-                    }?.onFailure { error ->
-                        GechuangLog.error("top_apps", "Unable to load App strip", error)
-                        // A temporary catalogue failure must not erase the
-                        // last successfully rendered user selection.
-                        scheduleRefreshRetry()
-                    }
-                } else {
-                    // A failed IPC query says nothing about the user's preferences.
-                    // Retain both the title mode and the already rendered app order.
-                    GechuangLog.warn("top_apps", "Config unavailable; retaining previous top content and App order")
+                cached?.let { onFrostStrengthChanged(it.frostStrength) }
+                initial.onSuccess { snapshot ->
+                    refreshRetryCount = 0
+                    lastRefreshAt = System.currentTimeMillis()
+                    renderApps(snapshot.visibleApps)
+                }.onFailure { error ->
+                    GechuangLog.error("top_apps", "Unable to load App strip", error)
                     scheduleRefreshRetry()
                 }
                 if (refreshPending) {
@@ -382,66 +288,65 @@ class TopAppStripView(
                     refresh(force = true)
                 }
             }
+            // A live query keeps the snapshot fresh, but it runs separately so a
+            // blocked provider cannot hold up the visible App strip.
+            Thread({
+                val live = runCatching { WorkspaceConfigClient.queryOrNull(context) }.getOrNull()
+                if (live == null) return@Thread
+                AppLanguage.updateHostLanguage(live.languageTag)
+                val refreshed = runCatching {
+                    repository.load(
+                        if (live.manualAppOrder) live.appComponents else emptyList(),
+                        manualOrder = live.manualAppOrder,
+                    )
+                }
+                mainHandler.post {
+                    if (generation != refreshGeneration) return@post
+                    onFrostStrengthChanged(live.frostStrength)
+                    refreshed.onSuccess { snapshot ->
+                        refreshRetryCount = 0
+                        lastRefreshAt = System.currentTimeMillis()
+                        renderApps(snapshot.visibleApps)
+                    }.onFailure { error ->
+                        GechuangLog.error("top_apps", "Unable to refresh App strip", error)
+                    }
+                }
+            }, "Gechuang-TopAppsLive").start()
         }, "Gechuang-TopApps").start()
     }
 
     private fun scheduleRefreshRetry() {
-        if (!isAttachedToWindow || !workspaceVisible) return
+        if (!isAttachedToWindow) return
         removeCallbacks(refreshRetry)
-        // A cold or temporarily frozen module can outlast the initial retries.
-        // Keep the last successful selection and retry while the panel is visible.
         val delay = minOf(1_000L * (1L shl refreshRetryCount), REFRESH_INTERVAL_MS)
         refreshRetryCount = (refreshRetryCount + 1).coerceAtMost(4)
         postDelayed(refreshRetry, delay)
     }
 
-    private fun actionRow(): View = LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        val buttonSize = dp(WorkspaceControlMetrics.ACTION_HEIGHT_DP)
-        addView(leftButton, LinearLayout.LayoutParams(buttonSize, buttonSize))
-        addView(rightButton, LinearLayout.LayoutParams(buttonSize, buttonSize))
-        addView(
-            FrameLayout(context).apply {
-                addView(titleView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-                addView(titleIcon, LayoutParams(dp(32), dp(32), Gravity.CENTER))
-            },
-            LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply {
-                marginStart = dp(8)
-                marginEnd = dp(8)
-            },
-        )
-        addView(
-            videoActionButton,
-            LinearLayout.LayoutParams(buttonSize, buttonSize),
-        )
-        addView(
-            settingsButton,
-            LinearLayout.LayoutParams(buttonSize, buttonSize),
-        )
-        addView(
-            exitButton.apply { scaleX = if (sidebarSide == SidebarSide.LEFT) -1f else 1f },
-            LinearLayout.LayoutParams(buttonSize, buttonSize),
-        )
-    }
-
     private fun renderApps(entries: List<TopAppRepository.AppEntry>) {
-        // Keep the touch-owning tile attached until its drag finishes.
         if (internalAppDragActive) { deferredApps = entries; return }
         val scrollX = appScroll.scrollX
         appRow.removeAllViews()
         if (entries.isEmpty()) {
             appRow.addView(messageView(AppLanguage.string(context, R.string.apps_none_available)))
         } else {
-            entries.forEach { entry -> appRow.addView(appTile(entry)) }
+            val visible = entries.take(PINNED_APP_SLOTS)
+            visible.forEach { entry -> appRow.addView(appTile(entry)) }
+            if (entries.size > PINNED_APP_SLOTS) {
+                appRow.addView(View(context).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(12), 1)
+                })
+            }
+            entries.drop(PINNED_APP_SLOTS).forEach { entry -> appRow.addView(appTile(entry)) }
         }
         appScroll.post { appScroll.scrollTo(scrollX, 0) }
-        GechuangLog.info("top_apps", "Rendered ${entries.size} launcher activities")
+        controlsChangedListener?.invoke()
+        GechuangLog.info("top_apps", "Rendered ${entries.size} launcher activities scroll=${appScroll.width}x${appScroll.height} row=${appRow.width} children=${appRow.childCount}")
     }
 
     private fun appTile(entry: TopAppRepository.AppEntry): View = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        gravity = Gravity.CENTER
         isClickable = true
         isLongClickable = true
         contentDescription = entry.label
@@ -450,7 +355,7 @@ class TopAppStripView(
                 setImageDrawable(entry.icon)
                 scaleType = ImageView.ScaleType.FIT_CENTER
             },
-            LinearLayout.LayoutParams(dp(WorkspaceControlMetrics.APP_ICON_SIZE_DP), dp(WorkspaceControlMetrics.APP_ICON_SIZE_DP)),
+            LinearLayout.LayoutParams(dp(APP_ICON_SIZE_DP), dp(APP_ICON_SIZE_DP)),
         )
         layoutParams = LinearLayout.LayoutParams(dp(APP_TILE_WIDTH_DP), LayoutParams.MATCH_PARENT)
         setOnClickListener { onAppClicked(Intent(entry.launchIntent)) }
@@ -467,9 +372,23 @@ class TopAppStripView(
         setOnTouchListener { tile, event -> onAppDragTouch(tile, event) }
     }
 
-    private fun updateSideButtons() {
-        leftButton.isSideSelected = sidebarSide == SidebarSide.LEFT
-        rightButton.isSideSelected = sidebarSide == SidebarSide.RIGHT
+    private fun addTile(): View = TextView(context).apply {
+        text = "+"
+        textSize = 22f
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        contentDescription = "添加应用"
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(9).toFloat()
+            setColor(Color.argb(30, 255, 255, 255))
+            setStroke(dp(1), Color.argb(120, 255, 255, 255))
+        }
+        isClickable = true
+        layoutParams = LinearLayout.LayoutParams(dp(APP_TILE_WIDTH_DP - 4), dp(APP_ICON_SIZE_DP)).apply {
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        setOnClickListener { onAddAppRequested() }
     }
 
     private fun messageView(message: String) = TextView(context).apply {
@@ -479,26 +398,32 @@ class TopAppStripView(
         setPadding(dp(16), 0, dp(16), 0)
     }
 
+    private fun sideDescription(side: SidebarSide): String = if (side == SidebarSide.LEFT) {
+        AppLanguage.string(context, R.string.window_side_left)
+    } else {
+        AppLanguage.string(context, R.string.window_side_right)
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        const val APP_TILE_WIDTH_DP = WorkspaceControlMetrics.APP_ICON_SIZE_DP + 8
-        const val APP_TILE_HEIGHT_DP = 44
+        const val APP_TILE_WIDTH_DP = 60
+        const val APP_ICON_SIZE_DP = 60
+        const val APP_TILE_HEIGHT_DP = 60
+        const val PINNED_APP_SLOTS = 4
+        const val BUTTON_SIZE_DP = 30
+        const val CONTROL_CLUSTER_WIDTH_DP = BUTTON_SIZE_DP * 4 + 12
         const val REFRESH_INTERVAL_MS = 15_000L
     }
 }
 
-private class SideSelectionButton(
-    context: Context,
-    private val representedSide: SidebarSide,
-) : View(context) {
+private class SideToggleButton(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(1.15f)
+        strokeWidth = dp(1.2f)
         strokeCap = Paint.Cap.SQUARE
-        strokeJoin = Paint.Join.MITER
     }
-    var isSideSelected: Boolean = false
+    var side: SidebarSide = SidebarSide.RIGHT
         set(value) {
             field = value
             invalidate()
@@ -508,37 +433,23 @@ private class SideSelectionButton(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val iconWidth = minOf(dp(24f), width * 0.6f)
-        val iconHeight = iconWidth
-        val iconLeft = (width - iconWidth) / 2f
-        val iconTop = (height - iconHeight) / 2f
-        val scale = iconWidth / 24f
-        val strokeInset = paint.strokeWidth / 2f
-        fun rect(left: Float, top: Float, right: Float, bottom: Float) = android.graphics.RectF(
-            iconLeft + left * scale + strokeInset,
-            iconTop + top * scale + strokeInset,
-            iconLeft + right * scale - strokeInset,
-            iconTop + bottom * scale - strokeInset,
-        )
-        val diagramSide = SidebarButtonLayout.sideInPanel(representedSide)
-        val mainRect = if (diagramSide == SidebarSide.LEFT) {
-            rect(8.5f, 1f, 22f, 23f)
-        } else {
-            rect(2f, 1f, 15.5f, 23f)
-        }
-        val stackLeft = if (diagramSide == SidebarSide.LEFT) {
-            2f
-        } else {
-            17f
-        }
+        val iconWidth = minOf(dp(24f), width * 0.62f)
+        val iconHeight = minOf(dp(20f), height * 0.5f)
+        val left = (width - iconWidth) / 2f
+        val top = (height - iconHeight) / 2f
+        val gap = dp(2.4f)
+        val half = (iconWidth - gap) / 2f
+        val leftRect = RectF(left, top, left + half, top + iconHeight)
+        val rightRect = RectF(left + half + gap, top, left + iconWidth, top + iconHeight)
         paint.color = Color.WHITE
-        paint.alpha = if (isSideSelected) 255 else 150
-        paint.style = if (isSideSelected) Paint.Style.FILL_AND_STROKE else Paint.Style.STROKE
-        canvas.drawRect(mainRect, paint)
-        repeat(3) { index ->
-            val top = 1f + index * 8f
-            canvas.drawRect(rect(stackLeft, top, stackLeft + 5f, top + 6f), paint)
-        }
+        paint.style = if (side == SidebarSide.LEFT) Paint.Style.FILL else Paint.Style.STROKE
+        canvas.drawRoundRect(leftRect, dp(2f), dp(2f), paint)
+        paint.style = if (side == SidebarSide.RIGHT) Paint.Style.FILL else Paint.Style.STROKE
+        canvas.drawRoundRect(rightRect, dp(2f), dp(2f), paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(1.1f)
+        paint.alpha = 210
+        canvas.drawLine(left, top + iconHeight + dp(3f), left + iconWidth, top + iconHeight + dp(3f), paint)
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
@@ -566,6 +477,22 @@ private abstract class ActionGlyphButton(context: Context) : View(context) {
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
 }
 
+private class TasksButton(context: Context) : ActionGlyphButton(context) {
+    override fun drawGlyph(canvas: Canvas, paint: Paint, cx: Float, cy: Float, radius: Float) {
+        val cardWidth = radius * 0.72f
+        val cardHeight = radius * 1.05f
+        val gap = radius * 0.22f
+        paint.style = Paint.Style.FILL
+        val left = cx - cardWidth - gap / 2f
+        val top = cy - cardHeight / 2f
+        canvas.drawRoundRect(left, top, left + cardWidth, top + cardHeight,
+            radius * 0.16f, radius * 0.16f, paint)
+        val right = cx + gap / 2f
+        canvas.drawRoundRect(right, top, right + cardWidth, top + cardHeight,
+            radius * 0.16f, radius * 0.16f, paint)
+    }
+}
+
 private class GearButton(context: Context) : ActionGlyphButton(context) {
     private val ringPath = Path()
 
@@ -587,45 +514,11 @@ private class GearButton(context: Context) : ActionGlyphButton(context) {
             canvas.restore()
         }
         ringPath.rewind()
-        // Rewind resets the native fill rule, so restore the hole on every draw.
         ringPath.fillType = Path.FillType.EVEN_ODD
         ringPath.addCircle(cx, cy, gearRadius * 0.68f, Path.Direction.CW)
         ringPath.addCircle(cx, cy, gearRadius * 0.28f, Path.Direction.CW)
         canvas.drawPath(ringPath, paint)
         paint.style = Paint.Style.STROKE
-    }
-}
-
-private class VideoActionButton(context: Context) : ActionGlyphButton(context) {
-    var isVideoEmbedded = false
-        set(value) {
-            if (field == value) return
-            field = value
-            invalidate()
-        }
-
-    override fun drawGlyph(canvas: Canvas, paint: Paint, cx: Float, cy: Float, radius: Float) {
-        val left = cx - radius
-        val top = cy - radius * 0.75f
-        val right = cx + radius
-        val bottom = cy + radius * 0.75f
-        val corner = radius * 0.12f
-        canvas.drawRoundRect(left, top, right, bottom, corner, corner, paint)
-
-        if (isVideoEmbedded) {
-            paint.style = Paint.Style.FILL
-            canvas.drawRoundRect(
-                cx, cy, right - radius * 0.2f, bottom - radius * 0.2f,
-                corner, corner, paint,
-            )
-            paint.style = Paint.Style.STROKE
-        } else {
-            val arrowX = cx + radius * 0.45f
-            val arrowY = cy - radius * 0.3f
-            canvas.drawLine(cx - radius * 0.45f, cy + radius * 0.3f, arrowX, arrowY, paint)
-            canvas.drawLine(arrowX - radius * 0.45f, arrowY, arrowX, arrowY, paint)
-            canvas.drawLine(arrowX, arrowY, arrowX, arrowY + radius * 0.45f, paint)
-        }
     }
 }
 
@@ -636,7 +529,7 @@ private class ExitButton(context: Context) : ActionGlyphButton(context) {
         fun y(value: Float) = cy + (value - 12f) * scale
         paint.strokeWidth = resources.displayMetrics.density * 1.35f
 
-        val box = android.graphics.Path().apply {
+        val box = Path().apply {
             moveTo(x(9f), y(7f))
             lineTo(x(5f), y(7f))
             lineTo(x(5f), y(21f))
@@ -645,7 +538,7 @@ private class ExitButton(context: Context) : ActionGlyphButton(context) {
         }
         canvas.drawPath(box, paint)
 
-        val arrow = android.graphics.Path().apply {
+        val arrow = Path().apply {
             moveTo(x(8f), y(14f))
             lineTo(x(11f), y(17f))
             lineTo(x(17f), y(11f))

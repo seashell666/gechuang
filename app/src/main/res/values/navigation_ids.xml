@@ -3,4 +3,5 @@
     <item name="settings_scroll" type="id" />
     <item name="advanced_scroll" type="id" />
     <item name="about_scroll" type="id" />
+    <item name="app_strip_section" type="id" />
 </resources>

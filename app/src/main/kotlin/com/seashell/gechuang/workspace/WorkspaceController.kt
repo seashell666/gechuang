@@ -1,5 +1,6 @@
 package com.seashell.gechuang.workspace
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Looper
@@ -82,6 +83,11 @@ class WorkspaceController(
     fun launchInSlot(intent: Intent): Boolean {
         if (state !is WorkspaceState.Active) return false
         return windowController.launchInSlot(intent).isSuccess
+    }
+
+    fun openTaskInSlot(taskId: Int, userId: Int, component: ComponentName): Boolean {
+        if (state !is WorkspaceState.Active) return false
+        return windowController.openTaskInSlot(taskId, userId, component)
     }
 
     fun openFromLauncher(intent: Intent): Boolean {

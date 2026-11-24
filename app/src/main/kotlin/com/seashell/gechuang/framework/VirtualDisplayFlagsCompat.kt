@@ -24,6 +24,13 @@ object VirtualDisplayFlagsCompat {
         }
 
         val ownFocus = Resolved(value, names.toList())
+        // The IME runs in another app process. A private virtual display is
+        // invisible to it and InputMethodService crashes while creating its
+        // token context ("Display must not be null"). PUBLIC keeps the display
+        // addressable so the keyboard can be hosted inside the same canvas.
+        val publicFlag = readFlag("VIRTUAL_DISPLAY_FLAG_PUBLIC") ?: 0x1
+        value = value or publicFlag
+        names += "PUBLIC"
         // Slots render previews and receive selections through display 0. Keep
         // their local focus without letting a moved editor take the global IME
         // focus from MAIN during an exchange.

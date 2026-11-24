@@ -14,6 +14,8 @@ import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+const val EXTRA_OPEN_APP_PICKER = "com.seashell.gechuang.extra.OPEN_APP_PICKER"
+
 data class WorkspaceTopConfig(
     // Missing mode falls back to legacy custom text or the default icon.
     val title: String = "",
@@ -132,6 +134,8 @@ class WorkspaceConfigReceiver : BroadcastReceiver() {
 }
 
 object WorkspaceConfigClient {
+    fun cachedOrNull(context: Context): WorkspaceTopConfig? = readSnapshot(context)
+
     fun queryOrNull(context: Context): WorkspaceTopConfig? {
         check(Looper.myLooper() != Looper.getMainLooper()) {
             "Workspace config must be queried off the main thread"
